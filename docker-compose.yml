@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: telegram_postgres
+    environment:
+      POSTGRES_DB: telegram_control
+      POSTGRES_USER: telegram_user
+      POSTGRES_PASSWORD: Zzxcdsaqwe123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telegram_user -d telegram_control"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: telegram_backend
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-default-key}
+      - DEBUG=${DEBUG:-True}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,0.0.0.0}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://frontend:80,http://localhost:8000}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-ZQAqJ3KzD1l6VDGbaijIcsSeOss0FSBZggu_gmpy2kc=}
+      - POSTGRES_DB=telegram_control
+      - POSTGRES_USER=telegram_user
+      - POSTGRES_PASSWORD=Zzxcdsaqwe123
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+    command: >
+      sh -c "
+      echo 'Waiting for PostgreSQL...' &&
+      python wait_for_db.py &&
+      python manage.py migrate --noinput &&
+      gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3
+      "
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: telegram_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

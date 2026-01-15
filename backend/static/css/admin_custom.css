@@ -1,0 +1,17 @@
+/* Custom admin styles */
+.header {
+    background: #2c3e50;
+    color: white;
+}
+
+#branding h1 {
+    color: white;
+}
+
+.module h2, .module caption, .inline-group h2 {
+    background: #34495e;
+}
+
+div.breadcrumbs {
+    background: #3498db;
+}
