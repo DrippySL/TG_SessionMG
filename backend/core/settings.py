@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from celery.schedules import crontab
 
 load_dotenv()
 
@@ -8,9 +9,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-default-key-change-in-production')
 
-DEBUG = os.getenv('DEBUG', 'True') == 'True'
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend,frontend,0.0.0.0').split(',')
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,backend,frontend,nginx,0.0.0.0').split(',')
 
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000,http://frontend:80,http://localhost:8000').split(',')
 CORS_ALLOW_ALL_ORIGINS = DEBUG
@@ -39,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'django_celery_results',
     'accounts',
 ]
 
@@ -78,7 +80,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('POSTGRES_DB', 'telegram_control'),
         'USER': os.getenv('POSTGRES_USER', 'telegram_user'),
-        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'Zzxcdsaqwe123'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'your-strong-password-here'),
         'HOST': os.getenv('POSTGRES_HOST', 'postgres'),
         'PORT': os.getenv('POSTGRES_PORT', '5432'),
     },
@@ -86,13 +88,40 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': os.getenv('POSTGRES_DB', 'telegram_control'),
         'USER': os.getenv('POSTGRES_USER', 'telegram_user'),
-        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'Zzxcdsaqwe123'),
+        'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'your-strong-password-here'),
         'HOST': os.getenv('POSTGRES_HOST', 'postgres'),
         'PORT': os.getenv('POSTGRES_PORT', '5432'),
     }
 }
 
 DATABASE_ROUTERS = ['accounts.db_routers.TelegramRouter']
+
+
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://redis:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://redis:6379/0')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Europe/Moscow'
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
+CELERY_RESULT_EXPIRES = 3600
+CELERYD_PREFETCH_MULTIPLIER = 1
+CELERY_ACKS_LATE = True
+CELERY_WORKER_CONCURRENCY = int(os.getenv('CELERY_CONCURRENCY', '4'))
+
+
+CELERY_BEAT_SCHEDULE = {
+    'daily-check-all-active-accounts': {
+        'task': 'accounts.tasks.daily_check_all_active_accounts',
+        'schedule': crontab(hour=3, minute=0),
+    },
+    'cleanup-old-tasks': {
+        'task': 'accounts.tasks.cleanup_old_tasks',
+        'schedule': crontab(hour=4, minute=0),
+    },
+}
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -137,8 +166,8 @@ LOGOUT_REDIRECT_URL = '/admin/login/'
 
 SESSION_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SECURE = False
-CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_DOMAIN = None
 CSRF_COOKIE_DOMAIN = None
 SESSION_COOKIE_HTTPONLY = True
@@ -147,19 +176,27 @@ CSRF_USE_SESSIONS = False
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_HEADER_NAME = 'HTTP_X_CSRFTOKEN'
 
-# Security settings for production
+
 if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_SSL_REDIRECT = True
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True') == 'True'
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
     X_FRAME_OPTIONS = 'DENY'
+else:
 
-# Logging configuration
+    SECURE_SSL_REDIRECT = False
+    SESSION_COOKIE_SECURE = False
+    CSRF_COOKIE_SECURE = False
+
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -183,11 +220,16 @@ LOGGING = {
             'filename': '/app/logs/django.log',
             'formatter': 'verbose',
         },
+        'celery_file': {
+            'class': 'logging.FileHandler',
+            'filename': '/app/logs/celery.log',
+            'formatter': 'verbose',
+        },
     },
     'loggers': {
         'django': {
             'handlers': ['console', 'file'],
-            'level': os.getenv('DJANGO_LOG_LEVEL', 'INFO'),
+            'level': LOG_LEVEL,
         },
         'accounts': {
             'handlers': ['console', 'file'],
@@ -199,15 +241,24 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': True,
         },
+        'celery': {
+            'handlers': ['console', 'celery_file'],
+            'level': LOG_LEVEL,
+            'propagate': True,
+        },
     },
 }
 
-# Ensure logs directory exists
+
 LOG_DIR = BASE_DIR / 'logs'
 LOG_DIR.mkdir(exist_ok=True)
 (LOG_DIR / 'django.log').touch(exist_ok=True)
+(LOG_DIR / 'celery.log').touch(exist_ok=True)
 
-# Telegram specific settings
-TELEGRAM_MAX_RETRIES = 3
+
+TELEGRAM_MAX_RETRIES = int(os.getenv('TELEGRAM_MAX_RETRIES', '3'))
 TELEGRAM_RETRY_DELAY = 2
 TELEGRAM_SESSION_TIMEOUT = 30
+TELEGRAM_ANTI_FLOOD_DELAY_MIN = int(os.getenv('TELEGRAM_ANTI_FLOOD_DELAY_MIN', '60'))
+TELEGRAM_ANTI_FLOOD_DELAY_MAX = int(os.getenv('TELEGRAM_ANTI_FLOOD_DELAY_MAX', '120'))
+TELEGRAM_GET_DIALOGS_LIMIT = int(os.getenv('TELEGRAM_GET_DIALOGS_LIMIT', '5'))

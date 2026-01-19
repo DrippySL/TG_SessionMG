@@ -20,6 +20,31 @@ class GlobalAppSettings(models.Model):
         return f"{self.app_name} (ID: {self.api_id})"
 
 
+class ProxyServer(models.Model):
+    """Прокси-серверы для подключения аккаунтов"""
+    name = models.CharField(max_length=100)
+    host = models.CharField(max_length=200)
+    port = models.IntegerField()
+    username = models.CharField(max_length=100, blank=True, null=True)
+    password = models.CharField(max_length=100, blank=True, null=True)
+    proxy_type = models.CharField(max_length=20, default='socks5', choices=[
+        ('socks5', 'SOCKS5'),
+        ('http', 'HTTP'),
+        ('mtproto', 'MTProto')
+    ])
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'proxy_servers'
+        verbose_name = 'Proxy Server'
+        verbose_name_plural = 'Proxy Servers'
+
+    def __str__(self):
+        return f"{self.name} ({self.host}:{self.port})"
+
+
 class TelegramAccount(models.Model):
     STATUS_CHOICES = [
         ('pending', 'Pending'),
@@ -28,6 +53,14 @@ class TelegramAccount(models.Model):
         ('active', 'Active'),
         ('suspended', 'Suspended'),
         ('reclaimed', 'Reclaimed'),
+        ('dead', 'Dead'),
+        ('flood', 'Flood Wait'),
+    ]
+    
+    ACTIVITY_STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('dead', 'Dead'),
+        ('flood', 'Flood'),
     ]
 
     phone_number = models.CharField(max_length=20, unique=True)
@@ -51,6 +84,12 @@ class TelegramAccount(models.Model):
     last_checked = models.DateTimeField(blank=True, null=True)
     account_status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='pending')
     
+    # Новые поля по ТЗ
+    last_ping = models.DateTimeField(blank=True, null=True, verbose_name='Последняя активность')
+    activity_status = models.CharField(max_length=20, choices=ACTIVITY_STATUS_CHOICES, default='active', verbose_name='Статус активности')
+    device_params = models.JSONField(default=dict, blank=True, null=True, verbose_name='Параметры устройства')
+    proxy = models.ForeignKey(ProxyServer, on_delete=models.SET_NULL, blank=True, null=True, verbose_name='Прокси-сервер', related_name='accounts')
+    
     # Безопасность
     encryption_version = models.IntegerField(default=1)
     
@@ -65,10 +104,37 @@ class TelegramAccount(models.Model):
             models.Index(fields=['account_status']),
             models.Index(fields=['employee_id']),
             models.Index(fields=['employee_fio']),
+            models.Index(fields=['last_ping']),
+            models.Index(fields=['activity_status']),
         ]
 
     def __str__(self):
         return f"{self.phone_number} ({self.account_status})"
+
+    @property
+    def health_indicator(self):
+        """Индикатор здоровья аккаунта на основе last_ping"""
+        if not self.last_ping:
+            return 'gray'
+
+        from django.utils.timezone import now, is_naive, make_aware
+
+
+        current_time = now()
+        lp_time = self.last_ping
+
+
+        if is_naive(lp_time):
+            lp_time = make_aware(lp_time)
+
+        time_diff = (current_time - lp_time).total_seconds()
+
+        if time_diff < 86400:
+            return 'green'
+        elif time_diff < 604800:
+            return 'yellow'
+        else:
+            return 'red'
 
 
 class AccountAuditLog(models.Model):
@@ -85,3 +151,47 @@ class AccountAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.action_type} for {self.account.phone_number}"
+
+
+class TaskQueue(models.Model):
+    """Очередь задач для проверки аккаунтов"""
+    TASK_TYPE_CHOICES = [
+        ('check_account', 'Проверка аккаунта'),
+        ('bulk_check', 'Групповая проверка'),
+        ('reauthorize', 'Повторная авторизация'),
+        ('reclaim', 'Возврат аккаунта'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Ожидает'),
+        ('processing', 'В процессе'),
+        ('completed', 'Завершено'),
+        ('failed', 'Ошибка'),
+        ('cancelled', 'Отменено'),
+    ]
+    
+    task_type = models.CharField(max_length=50, choices=TASK_TYPE_CHOICES)
+    account = models.ForeignKey(TelegramAccount, on_delete=models.CASCADE, blank=True, null=True)
+    account_ids = models.JSONField(blank=True, null=True, help_text='ID аккаунтов для групповой операции')
+    parameters = models.JSONField(default=dict, blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    progress = models.IntegerField(default=0, help_text='Прогресс в процентах')
+    result = models.JSONField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+    created_by = models.CharField(max_length=100, blank=True, null=True)
+    started_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'task_queue'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['task_type']),
+            models.Index(fields=['created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_task_type_display()} - {self.status}"

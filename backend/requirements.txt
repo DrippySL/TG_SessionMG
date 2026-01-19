@@ -17,6 +17,11 @@ pycryptodome>=3.20.0
 # Production Server
 gunicorn>=22.0.0
 
+# Celery for task queue
+celery>=5.3.0
+redis>=4.5.0
+django-celery-results>=2.4.0
+
 # Additional utilities
 requests>=2.31.0
 netifaces>=0.11.0

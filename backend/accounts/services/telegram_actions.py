@@ -21,7 +21,7 @@ from telethon.tl.functions.account import SendChangePhoneCodeRequest
 from asgiref.sync import sync_to_async, async_to_sync
 from .session_manager import SessionManager, ThreadLocalDBConnection
 from .encryption import EncryptionService
-from ..models import TelegramAccount, AccountAuditLog, GlobalAppSettings
+from ..models import TelegramAccount, AccountAuditLog, GlobalAppSettings, ProxyServer
 import random
 import string
 
@@ -57,15 +57,32 @@ async def _change_password_async(account_id, old_password=None, new_password=Non
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
         
+        # Получаем параметры устройства и прокси
+        device_params = account.device_params or {}
+        proxy_config = None
+        if account.proxy:
+            if account.proxy.proxy_type == 'mtproto':
+                from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.secret)
+            else:
+                proxy_config = (
+                    account.proxy.proxy_type,
+                    account.proxy.host,
+                    account.proxy.port,
+                    account.proxy.username,
+                    account.proxy.password
+                )
+        
         client = TelegramClient(
             StringSession(session_string), 
             account_data['api_id'], 
             account_data['api_hash'],
-            device_model=f"CorporateManager_{platform.system()}",
-            system_version=platform.version(),
-            app_version="1.0",
-            lang_code="ru",
-            system_lang_code="ru"
+            device_model=device_params.get('device_model', f'CorporateManager_{platform.system()}'),
+            system_version=device_params.get('system_version', platform.version()),
+            app_version=device_params.get('app_version', '1.0'),
+            lang_code=device_params.get('lang_code', 'ru'),
+            system_lang_code=device_params.get('system_lang_code', 'ru'),
+            proxy=proxy_config
         )
         
         await client.connect()
@@ -449,8 +466,12 @@ async def _get_account_details_async(account_id):
         Сотрудник: {account.employee_fio}
         ID сотрудника: {account.employee_id}
         Статус: {account.account_status}
+        Статус активности: {account.activity_status}
         2FA: {'Включено' if account_data['is_2fa_enabled'] else 'Отключено'}
+        Последняя активность: {account.last_ping}
         Email для восстановления: {account_data['recovery_email']}
+        Параметры устройства: {account.device_params}
+        Прокси: {account.proxy.name if account.proxy else 'Нет'}
         Последнее обновление: {account.session_updated_at}
         API ID: {account_data['api_id']}
         API Hash: {account_data['api_hash'][:10]}...
@@ -501,15 +522,32 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
         
+        # Получаем параметры устройства и прокси
+        device_params = account.device_params or {}
+        proxy_config = None
+        if account.proxy:
+            if account.proxy.proxy_type == 'mtproto':
+                from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.secret)
+            else:
+                proxy_config = (
+                    account.proxy.proxy_type,
+                    account.proxy.host,
+                    account.proxy.port,
+                    account.proxy.username,
+                    account.proxy.password
+                )
+        
         client = TelegramClient(
             StringSession(session_string), 
             account_data['api_id'], 
             account_data['api_hash'],
-            device_model=f"CorporateManager_{platform.system()}",
-            system_version=platform.version(),
-            app_version="1.0",
-            lang_code="ru",
-            system_lang_code="ru"
+            device_model=device_params.get('device_model', f'CorporateManager_{platform.system()}'),
+            system_version=device_params.get('system_version', platform.version()),
+            app_version=device_params.get('app_version', '1.0'),
+            lang_code=device_params.get('lang_code', 'ru'),
+            system_lang_code=device_params.get('system_lang_code', 'ru'),
+            proxy=proxy_config
         )
         
         await client.connect()
@@ -579,6 +617,7 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                 logger.warning(f"Failed to delete session from database for {account.phone_number}")
             
             account.account_status = 'reclaimed'
+            account.activity_status = 'dead'
             await sync_to_async(account.save)()
             
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
@@ -794,6 +833,7 @@ async def _verify_reauthorization_async(account_id, code, two_factor_password=No
         
         if success:
             account.account_status = 'active'
+            account.activity_status = 'active'
             await sync_to_async(account.save)()
             
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(

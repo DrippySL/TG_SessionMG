@@ -30,4 +30,14 @@ urlpatterns = [
     
     # CSRF token
     path('auth/csrf/', views.GetCSRFToken.as_view(), name='get-csrf-token'),
+    
+    # Task queue
+    path('tasks/', views.TaskQueueList.as_view(), name='task-list'),
+    path('tasks/<int:pk>/', views.TaskQueueDetail.as_view(), name='task-detail'),
+    path('tasks/<int:pk>/cancel/', views.CancelTaskView.as_view(), name='cancel-task'),
+    path('tasks/bulk-action/', views.BulkActionView.as_view(), name='bulk-action'),
+    
+    # Proxy servers
+    path('proxies/', views.ProxyServerList.as_view(), name='proxy-list'),
+    path('proxies/<int:pk>/', views.ProxyServerDetail.as_view(), name='proxy-detail'),
 ]

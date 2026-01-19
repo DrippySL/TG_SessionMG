@@ -12,6 +12,20 @@ CREATE TABLE IF NOT EXISTS global_app_settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Прокси-серверы
+CREATE TABLE IF NOT EXISTS proxy_servers (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    host VARCHAR(200) NOT NULL,
+    port INTEGER NOT NULL,
+    username VARCHAR(100),
+    password VARCHAR(100),
+    proxy_type VARCHAR(20) DEFAULT 'socks5',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Основная таблица для хранения аккаунтов
 CREATE TABLE IF NOT EXISTS telegram_accounts (
     id SERIAL PRIMARY KEY,
@@ -38,10 +52,34 @@ CREATE TABLE IF NOT EXISTS telegram_accounts (
     last_checked TIMESTAMP,
     account_status VARCHAR(20) DEFAULT 'pending',
     
+    -- Новые поля по ТЗ
+    last_ping TIMESTAMP,
+    activity_status VARCHAR(20) DEFAULT 'active',
+    device_params JSONB DEFAULT '{}',
+    proxy_id INTEGER REFERENCES proxy_servers(id) ON DELETE SET NULL,
+    
     -- Безопасность
     encryption_version INTEGER DEFAULT 1,
     
     -- Аудит
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Очередь задач
+CREATE TABLE IF NOT EXISTS task_queue (
+    id SERIAL PRIMARY KEY,
+    task_type VARCHAR(50) NOT NULL,
+    account_id INTEGER REFERENCES telegram_accounts(id) ON DELETE CASCADE,
+    account_ids JSONB,
+    parameters JSONB DEFAULT '{}',
+    status VARCHAR(20) DEFAULT 'pending',
+    progress INTEGER DEFAULT 0,
+    result JSONB,
+    error_message TEXT,
+    created_by VARCHAR(100),
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -61,4 +99,10 @@ CREATE TABLE IF NOT EXISTS account_audit_log (
 CREATE INDEX IF NOT EXISTS idx_telegram_accounts_phone ON telegram_accounts(phone_number);
 CREATE INDEX IF NOT EXISTS idx_telegram_accounts_status ON telegram_accounts(account_status);
 CREATE INDEX IF NOT EXISTS idx_telegram_accounts_employee ON telegram_accounts(employee_id);
+CREATE INDEX IF NOT EXISTS idx_telegram_accounts_last_ping ON telegram_accounts(last_ping);
+CREATE INDEX IF NOT EXISTS idx_telegram_accounts_activity_status ON telegram_accounts(activity_status);
+CREATE INDEX IF NOT EXISTS idx_telegram_accounts_proxy ON telegram_accounts(proxy_id);
+CREATE INDEX IF NOT EXISTS idx_task_queue_status ON task_queue(status);
+CREATE INDEX IF NOT EXISTS idx_task_queue_type ON task_queue(task_type);
+CREATE INDEX IF NOT EXISTS idx_task_queue_created ON task_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_account_audit_log_account ON account_audit_log(account_id);

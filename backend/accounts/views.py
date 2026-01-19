@@ -6,12 +6,18 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
-from .models import TelegramAccount, AccountAuditLog, GlobalAppSettings
+from django.db import transaction
+from django.utils.timezone import now
+from django.db.models import Q
+
+from .models import TelegramAccount, AccountAuditLog, GlobalAppSettings, TaskQueue, ProxyServer
 from .serializers import (
     TelegramAccountSerializer, AccountAuditLogSerializer,
-    GlobalAppSettingsSerializer
+    GlobalAppSettingsSerializer, TaskQueueSerializer,
+    ProxyServerSerializer, BulkActionSerializer, DeviceParamsSerializer
 )
 from .services import change_password, send_code, verify_code, delete_session, get_account_details, reclaim_account, check_api_credentials, reauthorize_account, verify_reauthorization
+from .tasks import check_account_task, bulk_check_accounts_task, reauthorize_account_task, reclaim_account_task
 
 
 class IsSuperUser(permissions.BasePermission):
@@ -24,15 +30,76 @@ class TelegramAccountList(generics.ListAPIView):
     permission_classes = [IsSuperUser]
 
     def get_queryset(self):
-        return TelegramAccount.objects.using('telegram_db').all()
+        queryset = TelegramAccount.objects.using('telegram_db').all()
+        
+        # Поиск
+        search_term = self.request.query_params.get('search')
+        if search_term:
+            queryset = queryset.filter(
+                Q(phone_number__icontains=search_term) |
+                Q(employee_id__icontains=search_term) |
+                Q(employee_fio__icontains=search_term)
+            )
+        
+        # Фильтрация по статусу
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(account_status=status_filter)
+        
+        # Фильтрация по активности
+        activity_filter = self.request.query_params.get('activity_status')
+        if activity_filter:
+            queryset = queryset.filter(activity_status=activity_filter)
+        
+        # Фильтрация по дате последней активности
+        last_ping_from = self.request.query_params.get('last_ping_from')
+        if last_ping_from:
+            queryset = queryset.filter(last_ping__gte=last_ping_from)
+        
+        last_ping_to = self.request.query_params.get('last_ping_to')
+        if last_ping_to:
+            queryset = queryset.filter(last_ping__lte=last_ping_to)
+        
+        # Сортировка по последней активности
+        sort_by = self.request.query_params.get('sort_by', '-last_ping')
+        queryset = queryset.order_by(sort_by)
+        
+        return queryset
 
 
-class TelegramAccountDetail(generics.RetrieveAPIView):
+class TelegramAccountDetail(generics.RetrieveUpdateAPIView):
     serializer_class = TelegramAccountSerializer
     permission_classes = [IsSuperUser]
 
     def get_queryset(self):
         return TelegramAccount.objects.using('telegram_db').all()
+    
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        
+        # Обновление device_params
+        if 'device_params' in request.data:
+            device_params_serializer = DeviceParamsSerializer(data=request.data.get('device_params', {}))
+            if device_params_serializer.is_valid():
+                instance.device_params = device_params_serializer.validated_data
+            else:
+                return Response(device_params_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Обновление proxy
+        if 'proxy' in request.data:
+            proxy_id = request.data.get('proxy')
+            if proxy_id:
+                try:
+                    proxy = ProxyServer.objects.get(id=proxy_id)
+                    instance.proxy = proxy
+                except ProxyServer.DoesNotExist:
+                    return Response({'error': 'Proxy server not found'}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                instance.proxy = None
+        
+        instance.save()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
 
 class AuditLogList(generics.ListAPIView):
@@ -40,7 +107,14 @@ class AuditLogList(generics.ListAPIView):
     permission_classes = [IsSuperUser]
 
     def get_queryset(self):
-        return AccountAuditLog.objects.using('telegram_db').all()[:100]
+        queryset = AccountAuditLog.objects.using('telegram_db').all()
+        
+        # Фильтрация по аккаунту
+        account_id = self.request.query_params.get('account_id')
+        if account_id:
+            queryset = queryset.filter(account_id=account_id)
+        
+        return queryset.order_by('-created_at')[:100]
 
 
 class ChangePasswordView(APIView):
@@ -188,17 +262,23 @@ class ReclaimAccountView(APIView):
     def post(self, request, pk):
         try:
             two_factor_password = request.data.get('two_factor_password', None)
-            result = reclaim_account(pk, two_factor_password)
-            if isinstance(result, dict):
-                if 'error' in result:
-                    if 'requires_2fa' in result and result['requires_2fa']:
-                        return Response(result, status=status.HTTP_200_OK)
-                    else:
-                        return Response(result, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    return Response(result)
-            else:
-                return Response({'message': result})
+            
+            # Создаем запись в очереди задач
+            task = TaskQueue.objects.create(
+                task_type='reclaim',
+                account_id=pk,
+                parameters={'two_factor_password': two_factor_password is not None},
+                created_by=request.user.username
+            )
+            
+            # Запускаем задачу Celery
+            reclaim_account_task.delay(pk, two_factor_password, task.id)
+            
+            return Response({
+                'message': 'Задача возврата аккаунта поставлена в очередь',
+                'task_id': task.id
+            })
+            
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -209,14 +289,24 @@ class ReauthorizeAccountView(APIView):
     def post(self, request, pk):
         try:
             two_factor_password = request.data.get('two_factor_password', None)
-            result = reauthorize_account(pk, two_factor_password)
-            if isinstance(result, dict):
-                if 'error' in result:
-                    return Response(result, status=status.HTTP_400_BAD_REQUEST)
-                else:
-                    return Response(result)
-            else:
-                return Response({'message': result})
+            
+            # Создаем запись в очереди задач
+            task = TaskQueue.objects.create(
+                task_type='reauthorize',
+                account_id=pk,
+                parameters={'two_factor_password': two_factor_password is not None},
+                created_by=request.user.username
+            )
+            
+            # Запускаем задачу Celery
+            reauthorize_account_task.delay(pk, task.id)
+            
+            return Response({
+                'message': 'Задача повторной авторизации поставлена в очередь',
+                'task_id': task.id,
+                'requires_code': True
+            })
+            
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -304,3 +394,144 @@ class CheckAPICredentialsView(APIView):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class TaskQueueList(generics.ListAPIView):
+    serializer_class = TaskQueueSerializer
+    permission_classes = [IsSuperUser]
+    
+    def get_queryset(self):
+        queryset = TaskQueue.objects.all().order_by('-created_at')
+        
+        # Фильтрация по статусу
+        status_filter = self.request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        # Фильтрация по типу задачи
+        task_type = self.request.query_params.get('task_type')
+        if task_type:
+            queryset = queryset.filter(task_type=task_type)
+        
+        return queryset[:50]
+
+
+class TaskQueueDetail(generics.RetrieveAPIView):
+    serializer_class = TaskQueueSerializer
+    permission_classes = [IsSuperUser]
+    queryset = TaskQueue.objects.all()
+
+
+class CancelTaskView(APIView):
+    permission_classes = [IsSuperUser]
+    
+    def post(self, request, pk):
+        try:
+            task = TaskQueue.objects.get(id=pk)
+            
+            if task.status not in ['pending', 'processing']:
+                return Response(
+                    {'error': 'Задачу можно отменить только в статусе "Ожидает" или "В процессе"'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            task.status = 'cancelled'
+            task.completed_at = now()
+            task.save()
+            
+            return Response({'message': 'Задача отменена'})
+            
+        except TaskQueue.DoesNotExist:
+            return Response(
+                {'error': 'Задача не найдена'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class BulkActionView(APIView):
+    permission_classes = [IsSuperUser]
+    
+    def post(self, request):
+        serializer = BulkActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        account_ids = serializer.validated_data['account_ids']
+        action = serializer.validated_data['action']
+        
+        try:
+            # Проверяем существование аккаунтов (используем ту же базу данных, что и для аккаунтов)
+            accounts_count = TelegramAccount.objects.using('telegram_db').filter(id__in=account_ids).count()
+            if accounts_count != len(account_ids):
+                return Response(
+                    {'error': f'Найдено только {accounts_count} из {len(account_ids)} аккаунтов'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Создаем задачу в очереди
+            task = TaskQueue.objects.create(
+                task_type='bulk_check' if action == 'check' else action,
+                account_ids=account_ids,
+                parameters={'action': action},
+                created_by=request.user.username
+            )
+            
+            # Запускаем соответствующую задачу Celery
+            if action == 'check':
+                bulk_check_accounts_task.delay(account_ids, task.id)
+                message = f'Проверка {len(account_ids)} аккаунтов поставлена в очередь'
+            else:
+                # Для других действий нужно реализовать отдельные задачи
+                return Response(
+                    {'error': f'Действие {action} еще не реализовано для групповых операций'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            return Response({
+                'message': message,
+                'task_id': task.id,
+                'account_count': len(account_ids)
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ProxyServerList(generics.ListCreateAPIView):
+    serializer_class = ProxyServerSerializer
+    permission_classes = [IsSuperUser]
+    queryset = ProxyServer.objects.all()
+
+
+class ProxyServerDetail(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = ProxyServerSerializer
+    permission_classes = [IsSuperUser]
+    queryset = ProxyServer.objects.all()
+
+
+class DeviceParamsUpdateView(APIView):
+    permission_classes = [IsSuperUser]
+    
+    def post(self, request, pk):
+        try:
+            account = TelegramAccount.objects.using('telegram_db').get(id=pk)
+            serializer = DeviceParamsSerializer(data=request.data)
+            
+            if serializer.is_valid():
+                account.device_params = serializer.validated_data
+                account.save()
+                return Response({'message': 'Параметры устройства обновлены'})
+            else:
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except TelegramAccount.DoesNotExist:
+            return Response({'error': 'Аккаунт не найден'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -7,7 +7,7 @@ from datetime import datetime
 from django.db import connections, transaction
 from django.db.utils import DEFAULT_DB_ALIAS
 from .encryption import EncryptionService
-from ..models import GlobalAppSettings
+from ..models import GlobalAppSettings, ProxyServer
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +108,8 @@ class SessionManager:
                     encrypted_api_id, encrypted_api_hash,
                     encrypted_session, encrypted_recovery_email,
                     encrypted_phone_code_hash,
-                    session_hash, session_updated_at, account_status
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    session_hash, session_updated_at, account_status, activity_status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (phone_number) DO UPDATE SET
                     employee_id = EXCLUDED.employee_id,
                     employee_fio = EXCLUDED.employee_fio,
@@ -122,6 +122,7 @@ class SessionManager:
                     session_hash = EXCLUDED.session_hash,
                     session_updated_at = EXCLUDED.session_updated_at,
                     account_status = EXCLUDED.account_status,
+                    activity_status = 'active',
                     updated_at = NOW()
                 """
                 
@@ -137,7 +138,8 @@ class SessionManager:
                     encrypted_phone_code_hash_bytes,
                     session_hash,
                     datetime.now(),
-                    account_status
+                    account_status,
+                    'active'
                 ))
 
             logger.info(f"Account session saved successfully for {phone_number}")
@@ -317,6 +319,8 @@ class SessionManager:
                 session_hash = %s,
                 session_updated_at = NOW(),
                 account_status = 'active',
+                activity_status = 'active',
+                last_ping = NOW(),
                 updated_at = NOW()
             WHERE phone_number = %s
             """
@@ -355,6 +359,7 @@ class SessionManager:
                 encrypted_phone_code_hash = NULL,
                 session_hash = %s,
                 session_updated_at = NOW(),
+                activity_status = 'dead',
                 updated_at = NOW()
             WHERE phone_number = %s
             """

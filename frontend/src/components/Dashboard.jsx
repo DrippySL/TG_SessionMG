@@ -28,15 +28,25 @@ import {
   Tooltip,
   Stepper,
   Step,
-  StepLabel
+  StepLabel,
+  Checkbox,
+  LinearProgress,
+  FormControlLabel,
+  MenuItem,
+  Select,
+  FormControl,
+  InputLabel
 } from '@mui/material'
-import { Search, Refresh, AccountCircle, PhoneAndroid, Email, Description, Settings, LockReset } from '@mui/icons-material'
+import { Search, Refresh, AccountCircle, PhoneAndroid, Email, Description, Settings, LockReset, CheckCircle, Error, Schedule, PlayArrow, Stop, FilterList, Clear } from '@mui/icons-material'
 import { fetchWithAuth } from '../utils'
 
 const Dashboard = () => {
   const [accounts, setAccounts] = useState([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
+  const [selectedAccounts, setSelectedAccounts] = useState([])
+  const [bulkActionLoading, setBulkActionLoading] = useState(false)
+  
   const [reclaimDialog, setReclaimDialog] = useState({ 
     open: false, 
     accountId: null, 
@@ -48,12 +58,14 @@ const Dashboard = () => {
     error: '',
     success: ''
   })
+  
   const [passwordDialog, setPasswordDialog] = useState({ open: false, accountId: null, accountPhone: '', oldPassword: '', newPassword: '' })
   const [detailsDialog, setDetailsDialog] = useState({ open: false, accountId: null, accountPhone: '', details: '' })
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' })
   const [refreshing, setRefreshing] = useState(false)
-  const [stats, setStats] = useState({ total: 0, active: 0, pending: 0, reclaimed: 0 })
+  const [stats, setStats] = useState({ total: 0, active: 0, pending: 0, reclaimed: 0, dead: 0, flood: 0 })
   const [apiSettingsDialog, setApiSettingsDialog] = useState({ open: false, apiId: '', apiHash: '', checking: false, checkResult: null })
+  
   const [reauthorizeDialog, setReauthorizeDialog] = useState({ 
     open: false, 
     accountId: null, 
@@ -66,25 +78,48 @@ const Dashboard = () => {
     verificationCode: '',
     twoFactorPassword: ''
   })
-
+  
+  const [tasks, setTasks] = useState([])
+  const [tasksLoading, setTasksLoading] = useState(false)
+  const [activeTasks, setActiveTasks] = useState(0)
+  const [bulkActionDialog, setBulkActionDialog] = useState({ open: false, action: 'check' })
+  
+  const [accountStatusFilter, setAccountStatusFilter] = useState('')
+  const [activityStatusFilter, setActivityStatusFilter] = useState('')
+  const [lastPingFromFilter, setLastPingFromFilter] = useState('')
+  const [lastPingToFilter, setLastPingToFilter] = useState('')
+  
   const reclaimSteps = ['Подтверждение', 'Ввод пароля 2FA', 'Завершение']
   const reauthorizeSteps = ['Отправка кода', 'Ввод кода подтверждения', 'Ввод пароля 2FA (если требуется)']
 
   const fetchAccounts = async () => {
     setLoading(true)
     try {
-      const response = await fetchWithAuth('/api/accounts/')
+      let url = '/api/accounts/'
+      const params = new URLSearchParams()
+      if (searchTerm) params.append('search', searchTerm)
+      if (accountStatusFilter) params.append('status', accountStatusFilter)
+      if (activityStatusFilter) params.append('activity_status', activityStatusFilter)
+      if (lastPingFromFilter) params.append('last_ping_from', lastPingFromFilter)
+      if (lastPingToFilter) params.append('last_ping_to', lastPingToFilter)
+      
+      if (params.toString()) {
+        url += '?' + params.toString()
+      }
+      
+      const response = await fetchWithAuth(url)
       if (response.ok) {
         const data = await response.json()
         setAccounts(data)
         
-        // Calculate statistics
         const total = data.length
         const active = data.filter(a => a.account_status === 'active').length
         const pending = data.filter(a => a.account_status === 'pending' || a.account_status === 'pending_2fa' || a.account_status === 'pending_reauthorization').length
         const reclaimed = data.filter(a => a.account_status === 'reclaimed').length
+        const dead = data.filter(a => a.activity_status === 'dead').length
+        const flood = data.filter(a => a.activity_status === 'flood').length
         
-        setStats({ total, active, pending, reclaimed })
+        setStats({ total, active, pending, reclaimed, dead, flood })
       } else {
         setSnackbar({
           open: true,
@@ -96,7 +131,7 @@ const Dashboard = () => {
       console.error('Ошибка загрузки аккаунтов:', err)
       setSnackbar({
         open: true,
-        message: 'Не удалось загрузить аккаунты. Проверьте подключение к бэкенду.',
+        message: 'Не удалось загрузить аккаунтов. Проверьте подключение к бэкенду.',
         severity: 'error'
       })
     } finally {
@@ -104,14 +139,116 @@ const Dashboard = () => {
       setRefreshing(false)
     }
   }
+  
+  const fetchTasks = async () => {
+    setTasksLoading(true)
+    try {
+      const response = await fetchWithAuth('/api/tasks/?status=processing')
+      if (response.ok) {
+        const data = await response.json()
+        setTasks(data)
+        setActiveTasks(data.filter(t => t.status === 'processing').length)
+      }
+    } catch (err) {
+      console.error('Ошибка загрузки задач:', err)
+    } finally {
+      setTasksLoading(false)
+    }
+  }
 
   useEffect(() => {
     fetchAccounts()
+    fetchTasks()
+    
+    const interval = setInterval(fetchTasks, 10000)
+    return () => clearInterval(interval)
   }, [])
 
   const handleRefresh = () => {
     setRefreshing(true)
     fetchAccounts()
+    fetchTasks()
+  }
+  
+  const handleFilterChange = () => {
+    setSelectedAccounts([])
+    fetchAccounts()
+  }
+  
+  const handleResetFilters = () => {
+    setSearchTerm('')
+    setAccountStatusFilter('')
+    setActivityStatusFilter('')
+    setLastPingFromFilter('')
+    setLastPingToFilter('')
+    setSelectedAccounts([])
+    fetchAccounts()
+  }
+
+  const handleSelectAccount = (accountId) => {
+    setSelectedAccounts(prev => {
+      if (prev.includes(accountId)) {
+        return prev.filter(id => id !== accountId)
+      } else {
+        return [...prev, accountId]
+      }
+    })
+  }
+
+  const handleSelectAll = () => {
+    if (selectedAccounts.length === filteredAccounts.length) {
+      setSelectedAccounts([])
+    } else {
+      setSelectedAccounts(filteredAccounts.map(a => a.id))
+    }
+  }
+
+  const handleBulkAction = async (action) => {
+    if (selectedAccounts.length === 0) {
+      setSnackbar({
+        open: true,
+        message: 'Выберите хотя бы один аккаунт',
+        severity: 'warning'
+      })
+      return
+    }
+    
+    setBulkActionLoading(true)
+    try {
+      const response = await fetchWithAuth('/api/tasks/bulk-action/', {
+        method: 'POST',
+        body: JSON.stringify({
+          account_ids: selectedAccounts,
+          action: action
+        })
+      })
+      
+      const data = await response.json()
+      if (response.ok) {
+        setSnackbar({
+          open: true,
+          message: data.message,
+          severity: 'success'
+        })
+        setSelectedAccounts([])
+        fetchTasks()
+      } else {
+        setSnackbar({
+          open: true,
+          message: data.error || 'Ошибка выполнения групповой операции',
+          severity: 'error'
+        })
+      }
+    } catch (err) {
+      setSnackbar({
+        open: true,
+        message: 'Ошибка соединения',
+        severity: 'error'
+      })
+    } finally {
+      setBulkActionLoading(false)
+      setBulkActionDialog({ open: false, action: 'check' })
+    }
   }
 
   const handleChangePassword = (accountId, accountPhone) => {
@@ -237,11 +374,9 @@ const Dashboard = () => {
     const { accountId, twoFactorPassword, step } = reclaimDialog
     
     if (step === 0) {
-      // Переходим к следующему шагу или отправляем запрос
       if (reclaimDialog.is2FAEnabled) {
         setReclaimDialog({...reclaimDialog, step: 1})
       } else {
-        // Отправляем запрос без пароля
         setReclaimDialog({...reclaimDialog, loading: true})
         try {
           const response = await fetchWithAuth(`/api/accounts/${accountId}/reclaim/`, {
@@ -253,6 +388,7 @@ const Dashboard = () => {
           if (data.message) {
             setReclaimDialog({...reclaimDialog, loading: false, step: 2, success: data.message})
             fetchAccounts()
+            fetchTasks()
           } else if (data.error) {
             if (data.requires_2fa) {
               setReclaimDialog({...reclaimDialog, loading: false, step: 1, error: data.error})
@@ -265,7 +401,6 @@ const Dashboard = () => {
         }
       }
     } else if (step === 1) {
-      // Отправляем запрос с паролем 2FA
       if (!twoFactorPassword) {
         setReclaimDialog({...reclaimDialog, error: 'Введите пароль 2FA'})
         return
@@ -284,6 +419,7 @@ const Dashboard = () => {
         if (data.message) {
           setReclaimDialog({...reclaimDialog, loading: false, step: 2, success: data.message})
           fetchAccounts()
+          fetchTasks()
         } else if (data.error) {
           setReclaimDialog({...reclaimDialog, loading: false, error: data.error})
         }
@@ -322,6 +458,7 @@ const Dashboard = () => {
         setReauthorizeDialog({...reauthorizeDialog, loading: false, error: data.error})
       } else {
         setReauthorizeDialog({...reauthorizeDialog, loading: false, step: 1, success: data.message})
+        fetchTasks()
       }
     } catch (err) {
       setReauthorizeDialog({...reauthorizeDialog, loading: false, error: 'Не удалось начать повторную авторизацию'})
@@ -393,27 +530,50 @@ const Dashboard = () => {
     }
   }
 
-  const filteredAccounts = accounts.filter(account =>
-    account.phone_number?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (account.employee_id && account.employee_id.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (account.employee_fio && account.employee_fio.toLowerCase().includes(searchTerm.toLowerCase()))
-  )
+  const filteredAccounts = accounts
 
-  const StatCard = ({ title, value, icon, color }) => (
-    <Card sx={{ minWidth: 200, backgroundColor: color + '.50', border: `1px solid ${color}.100` }}>
+  const StatCard = ({ title, value, icon, color, subtitle }) => (
+    <Card sx={{ minWidth: 180, backgroundColor: color + '.50', border: `1px solid ${color}.100` }}>
       <CardContent>
         <Box display="flex" alignItems="center" mb={1}>
           {icon}
-          <Typography variant="h6" sx={{ ml: 1 }}>
+          <Typography variant="h6" sx={{ ml: 1, fontSize: '1rem' }}>
             {title}
           </Typography>
         </Box>
         <Typography variant="h4" color={color + '.main'}>
           {value}
         </Typography>
+        {subtitle && (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            {subtitle}
+          </Typography>
+        )}
       </CardContent>
     </Card>
   )
+  
+  const HealthIndicator = ({ health }) => {
+    const colors = {
+      'green': '#4caf50',
+      'yellow': '#ff9800',
+      'red': '#f44336',
+      'gray': '#9e9e9e'
+    }
+    
+    return (
+      <Box 
+        sx={{ 
+          width: 12, 
+          height: 12, 
+          borderRadius: '50%', 
+          backgroundColor: colors[health] || colors.gray,
+          display: 'inline-block',
+          marginRight: 1
+        }} 
+      />
+    )
+  }
 
   const renderReclaimStep = () => {
     switch (reclaimDialog.step) {
@@ -542,6 +702,43 @@ const Dashboard = () => {
         Панель управления Telegram аккаунтами
       </Typography>
       
+      {activeTasks > 0 && (
+        <Alert 
+          severity="info" 
+          sx={{ mb: 3 }}
+          action={
+            <Button color="inherit" size="small" onClick={fetchTasks}>
+              Обновить
+            </Button>
+          }
+        >
+          <Box display="flex" alignItems="center" justifyContent="space-between" width="100%">
+            <Typography>
+              Активные задачи: {activeTasks}
+            </Typography>
+            <Box sx={{ width: '200px', ml: 2 }}>
+              {tasks.map(task => (
+                <Box key={task.id} sx={{ mb: 1 }}>
+                  <Typography variant="body2">
+                    {task.task_type === 'bulk_check' ? 'Групповая проверка' : 
+                     task.task_type === 'reauthorize' ? 'Повторная авторизация' : 
+                     task.task_type === 'reclaim' ? 'Возврат аккаунта' : task.task_type}
+                  </Typography>
+                  <LinearProgress 
+                    variant="determinate" 
+                    value={task.progress} 
+                    sx={{ height: 6, borderRadius: 3 }}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    {task.progress}%
+                  </Typography>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        </Alert>
+      )}
+      
       <Grid container spacing={2} sx={{ mb: 3 }}>
         <Grid item>
           <StatCard 
@@ -555,15 +752,16 @@ const Dashboard = () => {
           <StatCard 
             title="Активные" 
             value={stats.active} 
-            icon={<PhoneAndroid color="success" />} 
+            icon={<CheckCircle color="success" />} 
             color="success" 
+            subtitle={`${stats.dead} неактивных`}
           />
         </Grid>
         <Grid item>
           <StatCard 
             title="Ожидают" 
             value={stats.pending} 
-            icon={<Description color="warning" />} 
+            icon={<Schedule color="warning" />} 
             color="warning" 
           />
         </Grid>
@@ -575,24 +773,153 @@ const Dashboard = () => {
             color="error" 
           />
         </Grid>
+        <Grid item>
+          <StatCard 
+            title="Flood Wait" 
+            value={stats.flood} 
+            icon={<Error color="info" />} 
+            color="info" 
+          />
+        </Grid>
       </Grid>
       
+      {selectedAccounts.length > 0 && (
+        <Paper sx={{ p: 2, mb: 3, backgroundColor: 'primary.light', color: 'primary.contrastText' }}>
+          <Box display="flex" alignItems="center" justifyContent="space-between">
+            <Typography>
+              Выбрано аккаунтов: {selectedAccounts.length}
+            </Typography>
+            <Box>
+              <Button 
+                variant="contained" 
+                color="secondary" 
+                size="small" 
+                sx={{ mr: 1 }}
+                onClick={() => setBulkActionDialog({ open: true, action: 'check' })}
+                disabled={bulkActionLoading}
+                startIcon={<PlayArrow />}
+              >
+                {bulkActionLoading ? <CircularProgress size={20} /> : 'Запустить проверку'}
+              </Button>
+              <Button 
+                variant="outlined" 
+                color="inherit" 
+                size="small"
+                onClick={() => setSelectedAccounts([])}
+              >
+                Сбросить
+              </Button>
+            </Box>
+          </Box>
+        </Paper>
+      )}
+      
+      <Paper sx={{ p: 2, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Фильтры
+        </Typography>
+        <Grid container spacing={2} alignItems="center">
+          <Grid item xs={12} sm={6} md={3}>
+            <TextField
+              fullWidth
+              label="Поиск"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <Search />
+                  </InputAdornment>
+                )
+              }}
+              size="small"
+            />
+          </Grid>
+          <Grid item xs={12} sm={6} md={2}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Статус аккаунта</InputLabel>
+              <Select
+                value={accountStatusFilter}
+                label="Статус аккаунта"
+                onChange={(e) => setAccountStatusFilter(e.target.value)}
+              >
+                <MenuItem value="">Все</MenuItem>
+                <MenuItem value="active">Активен</MenuItem>
+                <MenuItem value="pending">Ожидает</MenuItem>
+                <MenuItem value="pending_2fa">Ожидает 2FA</MenuItem>
+                <MenuItem value="pending_reauthorization">Ожидает повторной авторизации</MenuItem>
+                <MenuItem value="suspended">Приостановлен</MenuItem>
+                <MenuItem value="reclaimed">Возвращен</MenuItem>
+                <MenuItem value="dead">Неактивен</MenuItem>
+                <MenuItem value="flood">Flood Wait</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={6} md={2}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Статус активности</InputLabel>
+              <Select
+                value={activityStatusFilter}
+                label="Статус активности"
+                onChange={(e) => setActivityStatusFilter(e.target.value)}
+              >
+                <MenuItem value="">Все</MenuItem>
+                <MenuItem value="active">Активен</MenuItem>
+                <MenuItem value="dead">Неактивен</MenuItem>
+                <MenuItem value="flood">Flood Wait</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={6} md={2}>
+            <TextField
+              fullWidth
+              label="Активность с"
+              type="date"
+              value={lastPingFromFilter}
+              onChange={(e) => setLastPingFromFilter(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              size="small"
+            />
+          </Grid>
+          <Grid item xs={12} sm={6} md={2}>
+            <TextField
+              fullWidth
+              label="Активность по"
+              type="date"
+              value={lastPingToFilter}
+              onChange={(e) => setLastPingToFilter(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              size="small"
+            />
+          </Grid>
+          <Grid item xs={12} sm={6} md={1}>
+            <Button
+              fullWidth
+              variant="contained"
+              color="primary"
+              onClick={handleFilterChange}
+              startIcon={<FilterList />}
+            >
+              Применить
+            </Button>
+          </Grid>
+          <Grid item xs={12} sm={6} md={1}>
+            <Button
+              fullWidth
+              variant="outlined"
+              onClick={handleResetFilters}
+              startIcon={<Clear />}
+            >
+              Сбросить
+            </Button>
+          </Grid>
+        </Grid>
+      </Paper>
+      
       <Box mb={3} display="flex" justifyContent="space-between" alignItems="center">
-        <TextField
-          placeholder="Поиск по номеру, ID сотрудника или ФИО"
-          variant="outlined"
-          size="small"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          InputProps={{
-            startAdornment: (
-              <InputAdornment position="start">
-                <Search />
-              </InputAdornment>
-            )
-          }}
-          sx={{ width: '300px' }}
-        />
+        <Typography variant="h6">
+          Список аккаунтов
+        </Typography>
         <Box>
           <Tooltip title="Проверить API настройки">
             <IconButton 
@@ -624,11 +951,19 @@ const Dashboard = () => {
         <Table>
           <TableHead>
             <TableRow>
+              <TableCell padding="checkbox">
+                <Checkbox
+                  indeterminate={selectedAccounts.length > 0 && selectedAccounts.length < filteredAccounts.length}
+                  checked={filteredAccounts.length > 0 && selectedAccounts.length === filteredAccounts.length}
+                  onChange={handleSelectAll}
+                />
+              </TableCell>
               <TableCell>Номер телефона</TableCell>
               <TableCell>ФИО сотрудника</TableCell>
               <TableCell>ID сотрудника</TableCell>
               <TableCell>Статус</TableCell>
-              <TableCell>Последнее обновление</TableCell>
+              <TableCell>Активность</TableCell>
+              <TableCell>Последняя активность</TableCell>
               <TableCell>2FA</TableCell>
               <TableCell>Действия</TableCell>
             </TableRow>
@@ -636,7 +971,7 @@ const Dashboard = () => {
           <TableBody>
             {filteredAccounts.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} align="center">
+                <TableCell colSpan={9} align="center">
                   <Typography variant="body2" color="textSecondary">
                     Аккаунты не найдены
                   </Typography>
@@ -644,9 +979,16 @@ const Dashboard = () => {
               </TableRow>
             ) : (
               filteredAccounts.map((account) => (
-                <TableRow key={account.id} hover>
+                <TableRow key={account.id} hover selected={selectedAccounts.includes(account.id)}>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      checked={selectedAccounts.includes(account.id)}
+                      onChange={() => handleSelectAccount(account.id)}
+                    />
+                  </TableCell>
                   <TableCell>
                     <Box display="flex" alignItems="center">
+                      <HealthIndicator health={account.health_indicator} />
                       <PhoneAndroid sx={{ mr: 1, color: 'text.secondary' }} />
                       {account.phone_number}
                     </Box>
@@ -673,7 +1015,18 @@ const Dashboard = () => {
                     />
                   </TableCell>
                   <TableCell>
-                    {account.session_updated_at ? new Date(account.session_updated_at).toLocaleDateString('ru-RU') : '-'}
+                    <Chip
+                      label={account.activity_status === 'active' ? 'Активен' : 
+                             account.activity_status === 'dead' ? 'Неактивен' : 
+                             account.activity_status === 'flood' ? 'Flood Wait' : account.activity_status}
+                      color={account.activity_status === 'active' ? 'success' : 
+                             account.activity_status === 'dead' ? 'error' : 
+                             account.activity_status === 'flood' ? 'warning' : 'default'}
+                      size="small"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {account.last_ping ? new Date(account.last_ping).toLocaleDateString('ru-RU') : '-'}
                   </TableCell>
                   <TableCell>
                     {account.is_2fa_enabled ? (
@@ -881,6 +1234,44 @@ const Dashboard = () => {
               {reauthorizeDialog.loading ? <CircularProgress size={24} /> : 'Подтвердить'}
             </Button>
           )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={bulkActionDialog.open} onClose={() => setBulkActionDialog({ open: false, action: 'check' })}>
+        <DialogTitle>Групповая операция</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Выбрано аккаунтов: {selectedAccounts.length}
+          </DialogContentText>
+          
+          <FormControl fullWidth sx={{ mb: 2 }}>
+            <InputLabel>Действие</InputLabel>
+            <Select
+              value={bulkActionDialog.action}
+              label="Действие"
+              onChange={(e) => setBulkActionDialog({...bulkActionDialog, action: e.target.value})}
+            >
+              <MenuItem value="check">Проверка аккаунтов</MenuItem>
+              <MenuItem value="reauthorize" disabled>Повторная авторизация</MenuItem>
+              <MenuItem value="reclaim" disabled>Возврат аккаунтов</MenuItem>
+            </Select>
+          </FormControl>
+          
+          <Alert severity="info">
+            Аккаунты будут проверены в фоновом режиме с анти-флуд задержками.
+            Прогресс можно отслеживать в панели мониторинга.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBulkActionDialog({ open: false, action: 'check' })}>Отмена</Button>
+          <Button 
+            onClick={() => handleBulkAction(bulkActionDialog.action)}
+            variant="contained"
+            color="primary"
+            disabled={bulkActionLoading}
+          >
+            {bulkActionLoading ? <CircularProgress size={24} /> : 'Запустить'}
+          </Button>
         </DialogActions>
       </Dialog>
 

@@ -4,7 +4,7 @@ from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
-from .models import TelegramAccount, AccountAuditLog, GlobalAppSettings
+from .models import TelegramAccount, AccountAuditLog, GlobalAppSettings, ProxyServer, TaskQueue
 
 
 class ReadOnlyAdmin(admin.ModelAdmin):
@@ -46,19 +46,47 @@ class GlobalAppSettingsAdmin(admin.ModelAdmin):
         return request.user.is_superuser
 
 
+@admin.register(ProxyServer)
+class ProxyServerAdmin(admin.ModelAdmin):
+    list_display = ('name', 'host', 'port', 'proxy_type', 'is_active')
+    list_filter = ('proxy_type', 'is_active')
+    fieldsets = (
+        (_('Основные настройки'), {
+            'fields': ('name', 'host', 'port', 'proxy_type')
+        }),
+        (_('Аутентификация'), {
+            'fields': ('username', 'password'),
+            'description': _('Оставьте пустым, если прокси не требует аутентификации')
+        }),
+        (_('Статус'), {
+            'fields': ('is_active',)
+        }),
+        (_('Метаданные'), {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+    readonly_fields = ('created_at', 'updated_at')
+
+
 @admin.register(TelegramAccount)
 class TelegramAccountAdmin(admin.ModelAdmin):
-    list_display = ('phone_number', 'employee_fio', 'employee_id', 'account_status', 'session_updated_at', 'created_at', 'account_actions')
-    list_filter = ('account_status', 'is_2fa_enabled')
+    list_display = ('phone_number', 'employee_fio', 'employee_id', 'account_status', 'activity_status', 'last_ping', 'session_updated_at', 'created_at', 'account_actions')
+    list_filter = ('account_status', 'activity_status', 'is_2fa_enabled')
     search_fields = ('phone_number', 'employee_id', 'employee_fio', 'account_note')
-    readonly_fields = ('session_hash', 'encryption_version', 'created_at', 'updated_at', 'account_actions', 'session_updated_at', 'last_checked')
+    readonly_fields = ('session_hash', 'encryption_version', 'created_at', 'updated_at', 'account_actions', 'session_updated_at', 'last_checked', 'last_ping', 'health_indicator')
     
     # Exclude encrypted fields from the form
-    exclude = ('encrypted_api_id', 'encrypted_api_hash', 'encrypted_session', 'encrypted_recovery_email')
+    exclude = ('encrypted_api_id', 'encrypted_api_hash', 'encrypted_session', 'encrypted_recovery_email', 'encrypted_phone_code_hash')
     
     fieldsets = (
         (_('Информация об аккаунте'), {
             'fields': ('phone_number', 'employee_fio', 'employee_id', 'account_note', 'account_status')
+        }),
+        (_('Статус активности'), {
+            'fields': ('activity_status', 'last_ping', 'health_indicator')
+        }),
+        (_('Параметры устройства и прокси'), {
+            'fields': ('device_params', 'proxy')
         }),
         (_('Информация о безопасности'), {
             'fields': ('session_updated_at', 'session_hash', 'is_2fa_enabled', 'last_checked')
@@ -74,6 +102,18 @@ class TelegramAccountAdmin(admin.ModelAdmin):
     
     # Fix: Explicitly define actions as a list to avoid the TypeError
     actions = []
+
+    def health_indicator(self, obj):
+        color = obj.health_indicator
+        if color == 'green':
+            return format_html('<span style="color: green;">●</span> Активен')
+        elif color == 'yellow':
+            return format_html('<span style="color: orange;">●</span> Недавно активен')
+        elif color == 'red':
+            return format_html('<span style="color: red;">●</span> Неактивен')
+        else:
+            return format_html('<span style="color: gray;">●</span> Нет данных')
+    health_indicator.short_description = _('Состояние')
 
     def account_actions(self, obj):
         if obj.account_status != 'active':
@@ -150,7 +190,7 @@ class TelegramAccountAdmin(admin.ModelAdmin):
             from .services.encryption import EncryptionService
             encryptor = EncryptionService()
             
-            details = f"Аккаунт {account.phone_number}: Сотрудник: {account.employee_fio}, Статус: {account.account_status}"
+            details = f"Аккаунт {account.phone_number}: Сотрудник: {account.employee_fio}, Статус: {account.account_status}, Активность: {account.activity_status}, Последний пинг: {account.last_ping}"
             self.message_user(request, details)
         return HttpResponseRedirect(reverse('admin:accounts_telegramaccount_changelist'))
 
@@ -161,6 +201,17 @@ class AccountAuditLogAdmin(ReadOnlyAdmin):
     list_filter = ('action_type',)
     search_fields = ('account__phone_number', 'performed_by', 'action_type')
     readonly_fields = ('account', 'action_type', 'action_details', 'performed_by', 'ip_address', 'created_at')
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser
+
+
+@admin.register(TaskQueue)
+class TaskQueueAdmin(ReadOnlyAdmin):
+    list_display = ('task_type', 'status', 'progress', 'created_by', 'created_at')
+    list_filter = ('task_type', 'status')
+    search_fields = ('created_by', 'error_message')
+    readonly_fields = ('task_type', 'account', 'account_ids', 'parameters', 'status', 'progress', 'result', 'error_message', 'created_by', 'started_at', 'completed_at', 'created_at', 'updated_at')
 
     def has_module_permission(self, request):
         return request.user.is_superuser
