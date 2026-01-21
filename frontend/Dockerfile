@@ -1,14 +1,10 @@
-FROM node:18-alpine AS build
+FROM node:18-alpine
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
 RUN npm run build
 
-
-FROM alpine
-WORKDIR /app
-
-COPY --from=build /app/dist ./dist
-
-CMD ["sleep", "infinity"]
+RUN mkdir -p /dist_host
+CMD ["sh", "-c", "cp -rf /app/dist/* /dist_host/ && sleep infinity"]
