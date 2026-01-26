@@ -21,6 +21,7 @@ from telethon.errors import (
 from .models import TelegramAccount, TaskQueue, AccountAuditLog, ProxyServer
 from .services.session_manager import SessionManager, ThreadLocalDBConnection
 from .services.encryption import EncryptionService
+from .services.telegram_actions import check_security_alerts
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def get_client_for_account(account_data, account):
     if account.proxy:
         if account.proxy.proxy_type == 'mtproto':
             from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
-            proxy_config = (account.proxy.host, account.proxy.port, account.proxy.secret)
+            proxy_config = (account.proxy.host, account.proxy.port, account.proxy.password)
         else:
             proxy_config = (
                 account.proxy.proxy_type,
@@ -159,6 +160,9 @@ async def check_account_async(account, account_data):
             
             return {'status': 'error', 'message': 'Не авторизован'}
         
+        # Проверяем безопасность (сообщения от сервисного канала)
+        has_security_alert, alert_message = await check_security_alerts(client, account.phone_number)
+        
         # Имитируем активность - получаем диалоги
         try:
             dialogs = await client.get_dialogs(limit=settings.TELEGRAM_GET_DIALOGS_LIMIT)
@@ -172,13 +176,32 @@ async def check_account_async(account, account_data):
         account.last_ping = now()
         account.activity_status = 'active'
         account.last_checked = now()
+        
+        # Сохраняем информацию о безопасности
+        security_info = {
+            'has_security_alert': has_security_alert,
+            'alert_message': alert_message,
+            'last_security_check': now().isoformat()
+        }
+        
+        # Обновляем device_params с информацией о безопасности
+        current_device_params = account.device_params or {}
+        current_device_params['security_info'] = security_info
+        account.device_params = current_device_params
+        
         await sync_to_async(account.save)()
         
         # Логируем успешную проверку
+        audit_details = {
+            'dialog_count': dialog_count,
+            'has_security_alert': has_security_alert,
+            'alert_message': alert_message
+        }
+        
         await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
             account=account,
             action_type='check_success',
-            action_details={'dialog_count': dialog_count},
+            action_details=audit_details,
             performed_by='Система'
         )
         
@@ -186,7 +209,9 @@ async def check_account_async(account, account_data):
             'status': 'success',
             'message': 'Аккаунт активен',
             'dialog_count': dialog_count,
-            'last_ping': account.last_ping.isoformat()
+            'last_ping': account.last_ping.isoformat(),
+            'has_security_alert': has_security_alert,
+            'alert_message': alert_message
         }
         
     except AuthKeyInvalidError as e:
@@ -265,7 +290,7 @@ def bulk_check_accounts_task(self, account_ids, task_queue_id):
             
             # Выполняем проверку аккаунта
             try:
-                result = check_account_task(account_id, task_queue_id)
+                result = check_account_task(account_id)
                 results.append({
                     'account_id': account_id,
                     'result': result
@@ -441,7 +466,7 @@ def daily_check_all_active_accounts():
         created_by='Система'
     )
     
-    # Запускаем задачу
+    # Запускаем задачу Celery
     bulk_check_accounts_task.delay(account_ids, task.id)
     
     logger.info(f"Scheduled daily check for {len(account_ids)} accounts, task ID: {task.id}")

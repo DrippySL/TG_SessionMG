@@ -37,7 +37,7 @@ import {
   FormControl,
   InputLabel
 } from '@mui/material'
-import { Search, Refresh, AccountCircle, PhoneAndroid, Email, Description, Settings, LockReset, CheckCircle, Error, Schedule, PlayArrow, Stop, FilterList, Clear } from '@mui/icons-material'
+import { Search, Refresh, AccountCircle, PhoneAndroid, Email, Description, Settings, LockReset, CheckCircle, Error, Schedule, PlayArrow, Stop, FilterList, Clear, Edit } from '@mui/icons-material'
 import { fetchWithAuth } from '../utils'
 
 const Dashboard = () => {
@@ -88,6 +88,18 @@ const Dashboard = () => {
   const [activityStatusFilter, setActivityStatusFilter] = useState('')
   const [lastPingFromFilter, setLastPingFromFilter] = useState('')
   const [lastPingToFilter, setLastPingToFilter] = useState('')
+  
+  const [editDialog, setEditDialog] = useState({ 
+    open: false, 
+    accountId: null, 
+    accountPhone: '', 
+    employee_fio: '', 
+    employee_id: '', 
+    account_note: '',
+    loading: false, 
+    error: '', 
+    success: '' 
+  })
   
   const reclaimSteps = ['Подтверждение', 'Ввод пароля 2FA', 'Завершение']
   const reauthorizeSteps = ['Отправка кода', 'Ввод кода подтверждения', 'Ввод пароля 2FA (если требуется)']
@@ -527,6 +539,55 @@ const Dashboard = () => {
         checking: false, 
         checkResult: {isValid: false, message: 'Ошибка проверки: ' + err.message}
       })
+    }
+  }
+
+  const handleEditAccount = (accountId, accountPhone, employee_fio, employee_id, account_note) => {
+    setEditDialog({ 
+      open: true, 
+      accountId, 
+      accountPhone, 
+      employee_fio: employee_fio || '', 
+      employee_id: employee_id || '', 
+      account_note: account_note || '',
+      loading: false, 
+      error: '', 
+      success: '' 
+    })
+  }
+
+  const handleSaveEdit = async () => {
+    const { accountId, employee_fio, employee_id, account_note } = editDialog
+    
+    if (!employee_fio.trim() && !employee_id.trim()) {
+      setEditDialog({...editDialog, error: 'Заполните хотя бы одно поле'})
+      return
+    }
+    
+    setEditDialog({...editDialog, loading: true, error: '', success: ''})
+    
+    try {
+      const response = await fetchWithAuth(`/api/accounts/${accountId}/edit/`, {
+        method: 'POST',
+        body: JSON.stringify({
+          employee_fio: employee_fio.trim(),
+          employee_id: employee_id.trim(),
+          account_note: account_note.trim()
+        })
+      })
+      
+      const data = await response.json()
+      if (response.ok) {
+        setEditDialog({...editDialog, loading: false, success: data.message})
+        fetchAccounts()
+        setTimeout(() => {
+          setEditDialog({ open: false, accountId: null, accountPhone: '', employee_fio: '', employee_id: '', account_note: '', loading: false, error: '', success: '' })
+        }, 2000)
+      } else {
+        setEditDialog({...editDialog, loading: false, error: data.error})
+      }
+    } catch (err) {
+      setEditDialog({...editDialog, loading: false, error: 'Ошибка соединения'})
     }
   }
 
@@ -1040,6 +1101,14 @@ const Dashboard = () => {
                       <Button
                         size="small"
                         variant="outlined"
+                        startIcon={<Edit />}
+                        onClick={() => handleEditAccount(account.id, account.phone_number, account.employee_fio, account.employee_id, account.account_note)}
+                      >
+                        Редактировать
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="outlined"
                         onClick={() => handleChangePassword(account.id, account.phone_number)}
                       >
                         Сменить пароль
@@ -1096,6 +1165,73 @@ const Dashboard = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDetailsDialog({ open: false, accountId: null, accountPhone: '', details: '' })}>Закрыть</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={editDialog.open} onClose={() => setEditDialog({ open: false, accountId: null, accountPhone: '', employee_fio: '', employee_id: '', account_note: '', loading: false, error: '', success: '' })} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          Редактирование аккаунта {editDialog.accountPhone}
+        </DialogTitle>
+        <DialogContent>
+          {editDialog.error && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {editDialog.error}
+            </Alert>
+          )}
+          
+          {editDialog.success && (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              {editDialog.success}
+            </Alert>
+          )}
+          
+          <DialogContentText sx={{ mb: 2 }}>
+            Измените данные сотрудника для этого аккаунта.
+          </DialogContentText>
+          
+          <TextField
+            autoFocus
+            margin="dense"
+            label="ФИО сотрудника"
+            fullWidth
+            value={editDialog.employee_fio}
+            onChange={(e) => setEditDialog({...editDialog, employee_fio: e.target.value})}
+            disabled={editDialog.loading}
+          />
+          <TextField
+            margin="dense"
+            label="ID сотрудника"
+            fullWidth
+            value={editDialog.employee_id}
+            onChange={(e) => setEditDialog({...editDialog, employee_id: e.target.value})}
+            disabled={editDialog.loading}
+          />
+          <TextField
+            margin="dense"
+            label="Примечание"
+            fullWidth
+            multiline
+            rows={3}
+            value={editDialog.account_note}
+            onChange={(e) => setEditDialog({...editDialog, account_note: e.target.value})}
+            disabled={editDialog.loading}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setEditDialog({ open: false, accountId: null, accountPhone: '', employee_fio: '', employee_id: '', account_note: '', loading: false, error: '', success: '' })}
+            disabled={editDialog.loading}
+          >
+            Отмена
+          </Button>
+          <Button 
+            onClick={handleSaveEdit} 
+            variant="contained" 
+            color="primary"
+            disabled={editDialog.loading}
+          >
+            {editDialog.loading ? <CircularProgress size={24} /> : 'Сохранить'}
+          </Button>
         </DialogActions>
       </Dialog>
 

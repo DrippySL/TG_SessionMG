@@ -9,6 +9,7 @@ urlpatterns = [
     path('accounts/<int:pk>/change-password/', views.ChangePasswordView.as_view(), name='change-password'),
     path('accounts/<int:pk>/delete-session/', views.DeleteSessionView.as_view(), name='delete-session'),
     path('accounts/<int:pk>/details/', views.GetAccountDetailsView.as_view(), name='account-details'),
+    path('accounts/<int:pk>/edit/', views.EditAccountView.as_view(), name='account-edit'),
     path('accounts/send-code/', views.SendCodeView.as_view(), name='send-code'),
     path('accounts/verify-code/', views.VerifyCodeView.as_view(), name='verify-code'),
     
@@ -24,6 +25,9 @@ urlpatterns = [
     
     # Audit logs
     path('audit-logs/', views.AuditLogList.as_view(), name='audit-log-list'),
+    
+    # Security alerts
+    path('security-alerts/', views.SecurityAlertsView.as_view(), name='security-alerts'),
     
     # Auth check
     path('auth/check/', views.AuthCheckView.as_view(), name='auth-check'),

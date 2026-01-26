@@ -77,6 +77,14 @@ class TelegramAccountDetail(generics.RetrieveUpdateAPIView):
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
         
+        # Обновление employee_fio и employee_id
+        if 'employee_fio' in request.data:
+            instance.employee_fio = request.data.get('employee_fio', instance.employee_fio)
+        if 'employee_id' in request.data:
+            instance.employee_id = request.data.get('employee_id', instance.employee_id)
+        if 'account_note' in request.data:
+            instance.account_note = request.data.get('account_note', instance.account_note)
+        
         # Обновление device_params
         if 'device_params' in request.data:
             device_params_serializer = DeviceParamsSerializer(data=request.data.get('device_params', {}))
@@ -531,6 +539,78 @@ class DeviceParamsUpdateView(APIView):
                 return Response({'message': 'Параметры устройства обновлены'})
             else:
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except TelegramAccount.DoesNotExist:
+            return Response({'error': 'Аккаунт не найден'}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SecurityAlertsView(APIView):
+    """API для получения результатов проверки безопасности"""
+    permission_classes = [IsSuperUser]
+    
+    def get(self, request):
+        try:
+            # Получаем аккаунты с информацией о безопасности
+            accounts = TelegramAccount.objects.using('telegram_db').all()
+            
+            security_results = []
+            for account in accounts:
+                security_info = account.device_params.get('security_info', {}) if account.device_params else {}
+                
+                security_results.append({
+                    'id': account.id,
+                    'phone_number': account.phone_number,
+                    'employee_fio': account.employee_fio,
+                    'employee_id': account.employee_id,
+                    'has_security_alert': security_info.get('has_security_alert', False),
+                    'alert_message': security_info.get('alert_message', ''),
+                    'last_security_check': security_info.get('last_security_check', ''),
+                    'account_status': account.account_status,
+                    'activity_status': account.activity_status,
+                    'last_ping': account.last_ping
+                })
+            
+            return Response(security_results)
+            
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class EditAccountView(APIView):
+    """API для редактирования employee_fio и employee_id"""
+    permission_classes = [IsSuperUser]
+    
+    def post(self, request, pk):
+        try:
+            account = TelegramAccount.objects.using('telegram_db').get(id=pk)
+            
+            if 'employee_fio' in request.data:
+                account.employee_fio = request.data['employee_fio']
+            if 'employee_id' in request.data:
+                account.employee_id = request.data['employee_id']
+            if 'account_note' in request.data:
+                account.account_note = request.data['account_note']
+            
+            account.save()
+            
+            # Логируем действие
+            AccountAuditLog.objects.using('telegram_db').create(
+                account=account,
+                action_type='account_updated',
+                action_details={
+                    'employee_fio': account.employee_fio,
+                    'employee_id': account.employee_id,
+                    'account_note': account.account_note
+                },
+                performed_by=request.user.username
+            )
+            
+            return Response({'message': 'Данные аккаунта успешно обновлены'})
+            
         except TelegramAccount.DoesNotExist:
             return Response({'error': 'Аккаунт не найден'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:

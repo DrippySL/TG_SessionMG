@@ -17,6 +17,7 @@ import {
 } from '@mui/material'
 import Dashboard from './components/Dashboard'
 import AddAccount from './components/AddAccount'
+import AlertDetected from './components/AlertDetected'
 import { getCSRFToken, fetchWithAuth } from './utils'
 
 export default function App() {
@@ -125,6 +126,7 @@ export default function App() {
           )}
           <Button color="inherit" href="/dashboard">Панель управления</Button>
           <Button color="inherit" href="/add-account">Добавить аккаунт</Button>
+          <Button color="inherit" href="/alert-detected">Мониторинг безопасности</Button>
           <Button color="inherit" onClick={handleLogout}>Выйти</Button>
         </Toolbar>
       </AppBar>
@@ -132,6 +134,7 @@ export default function App() {
         <Routes>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/add-account" element={<AddAccount />} />
+          <Route path="/alert-detected" element={<AlertDetected />} />
           <Route path="/" element={<Navigate to="/dashboard" />} />
         </Routes>
       </Container>

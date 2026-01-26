@@ -117,14 +117,13 @@ class TelegramAccount(models.Model):
         if not self.last_ping:
             return 'gray'
 
-        from django.utils.timezone import now, is_naive, make_aware
-
-
+        from django.utils.timezone import now
         current_time = now()
         lp_time = self.last_ping
 
-
-        if is_naive(lp_time):
+        # Если last_ping наивный (без часового пояса), преобразуем в aware
+        if not lp_time.tzinfo:
+            from django.utils.timezone import make_aware
             lp_time = make_aware(lp_time)
 
         time_diff = (current_time - lp_time).total_seconds()

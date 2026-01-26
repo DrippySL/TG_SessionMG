@@ -4,12 +4,14 @@ import json
 import sys
 import platform
 import time
+import datetime
+from datetime import timezone
 from telethon import TelegramClient, version
 from telethon.sessions import StringSession
 from telethon.errors import (
-    SessionPasswordNeededError, 
-    PhoneCodeInvalidError, 
-    PhoneCodeExpiredError, 
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
     PasswordHashInvalidError,
     PhoneNumberUnoccupiedError,
     PhoneNumberFloodError,
@@ -28,6 +30,37 @@ import string
 logger = logging.getLogger(__name__)
 
 
+async def check_security_alerts(client, phone):
+    """
+    Проверяет последние сообщения от сервисного канала Telegram (ID 777000)
+    на наличие сигналов о попытках изменения безопасности аккаунта.
+    """
+    try:
+        # Ищем сообщения от официального канала Telegram (ID 777000)
+        async for message in client.iter_messages(777000, limit=10):
+            text = message.text.lower() if message.text else ''
+            triggers = ['password', 'recovery', 'email', 'пароль', 'почта', 'сброс', 'код', 'code', 'reset', 'изменение', 'change']
+
+            # Если сообщение свежее (за последние 24 часа) и содержит триггер
+            message_time = message.date
+            current_time = datetime.datetime.now(timezone.utc)
+            time_diff = current_time - message_time
+
+            if time_diff.total_seconds() < 86400:  # 24 часа
+                if any(word in text for word in triggers):
+                    # Если сообщение не прочитано (is_read может быть False или None)
+                    if message.is_read is not True:
+                        # Помечаем как прочитанное, чтобы не спамить в следующий раз
+                        await client.send_read_acknowledge(777000, max_id=message.id)
+                        return True, message.text
+
+        return False, None
+
+    except Exception as e:
+        logger.error(f"Error checking security alerts for {phone}: {e}")
+        return False, None
+
+
 def change_password(account_id, old_password=None, new_password=None):
     """Change password for Telegram account"""
     try:
@@ -42,28 +75,28 @@ def change_password(account_id, old_password=None, new_password=None):
 async def _change_password_async(account_id, old_password=None, new_password=None):
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
-        
+
         session_manager = SessionManager()
         account_data = await sync_to_async(session_manager.load_account_session)(account.phone_number)
-        
+
         if account_data['account_status'] != 'active':
             return "Аккаунт не активен"
-        
+
         if not account_data['session_data']:
             return "Данные сессии не найдены"
-            
+
         session_data = account_data['session_data']
         if isinstance(session_data, memoryview):
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
-        
+
         # Получаем параметры устройства и прокси
         device_params = account.device_params or {}
         proxy_config = None
         if account.proxy:
             if account.proxy.proxy_type == 'mtproto':
                 from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
-                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.secret)
+                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.password)
             else:
                 proxy_config = (
                     account.proxy.proxy_type,
@@ -72,10 +105,10 @@ async def _change_password_async(account_id, old_password=None, new_password=Non
                     account.proxy.username,
                     account.proxy.password
                 )
-        
+
         client = TelegramClient(
-            StringSession(session_string), 
-            account_data['api_id'], 
+            StringSession(session_string),
+            account_data['api_id'],
             account_data['api_hash'],
             device_model=device_params.get('device_model', f'CorporateManager_{platform.system()}'),
             system_version=device_params.get('system_version', platform.version()),
@@ -84,16 +117,16 @@ async def _change_password_async(account_id, old_password=None, new_password=Non
             system_lang_code=device_params.get('system_lang_code', 'ru'),
             proxy=proxy_config
         )
-        
+
         await client.connect()
-        
+
         if not await client.is_user_authorized():
             await client.disconnect()
             return "Не авторизован"
-        
+
         try:
             me = await client.get_me()
-            
+
             try:
                 await client.edit_2fa(
                     current_password=old_password if old_password else '',
@@ -115,7 +148,7 @@ async def _change_password_async(account_id, old_password=None, new_password=Non
             except Exception as e:
                 logger.error(f"Ошибка при изменении пароля: {e}")
                 return f"Не удалось изменить пароль: {str(e)}"
-            
+
             if password_changed:
                 await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                     account=account,
@@ -123,14 +156,14 @@ async def _change_password_async(account_id, old_password=None, new_password=Non
                     action_details={"password_changed": True, "has_2fa": old_password is not None},
                     performed_by="Система"
                 )
-                
+
                 return f"Пароль успешно изменен для {account.phone_number}. Новый пароль: {new_password}"
             else:
                 return "Не удалось изменить пароль"
-                
+
         finally:
             await client.disconnect()
-    
+
     except Exception as e:
         logger.error(f"Ошибка при смене пароля: {e}")
         return f"Ошибка: {str(e)}"
@@ -151,21 +184,21 @@ async def _send_code_async(phone, employee_id, employee_fio, account_note, recov
     try:
         logger.info(f"Starting send_code for {phone}")
         logger.info(f"Telethon version: {version.__version__}")
-        
+
         if not all([phone, employee_id, employee_fio, recovery_email]):
             return {"error": "Все поля обязательны для заполнения"}
-        
+
         session_manager = SessionManager()
         settings = await sync_to_async(GlobalAppSettings.objects.using('telegram_db').filter(is_active=True).first)()
         if not settings:
             return {"error": "Глобальные настройки приложения не настроены"}
-        
+
         api_id, api_hash = settings.api_id, settings.api_hash
         logger.info(f"Using API ID: {api_id}, API Hash: {api_hash[:10]}...")
-        
+
         client = TelegramClient(
-            StringSession(), 
-            api_id, 
+            StringSession(),
+            api_id,
             api_hash,
             device_model=f"CorporateManager_{platform.system()}",
             system_version=platform.version(),
@@ -173,10 +206,10 @@ async def _send_code_async(phone, employee_id, employee_fio, account_note, recov
             lang_code="ru",
             system_lang_code="ru"
         )
-        
+
         await client.connect()
         logger.info(f"Connected to Telegram, connection status: {client.is_connected()}")
-        
+
         try:
             logger.info(f"Sending code request to {phone}")
             result = await client.send_code_request(
@@ -185,12 +218,12 @@ async def _send_code_async(phone, employee_id, employee_fio, account_note, recov
             )
             phone_code_hash = result.phone_code_hash
             logger.info(f"Phone code hash received: {phone_code_hash[:20]}...")
-            
+
             session_string = client.session.save()
             session_data = session_string.encode('utf-8')
-            
+
             await client.disconnect()
-            
+
             success = await sync_to_async(session_manager.save_account_session)(
                 phone_number=phone,
                 session_data=session_data,
@@ -201,13 +234,13 @@ async def _send_code_async(phone, employee_id, employee_fio, account_note, recov
                 account_status='pending',
                 phone_code_hash=phone_code_hash
             )
-            
+
             if success:
                 logger.info(f"Successfully saved session for {phone}")
                 return {"message": f"Код подтверждения отправлен на {phone}. Пожалуйста, проверьте SMS сообщение."}
             else:
                 return {"error": f"Код отправлен, но не удалось сохранить данные аккаунта"}
-                
+
         except ApiIdInvalidError as e:
             await client.disconnect()
             logger.error(f"Invalid API ID/API Hash: {e}")
@@ -224,7 +257,7 @@ async def _send_code_async(phone, employee_id, employee_fio, account_note, recov
             await client.disconnect()
             logger.error(f"Ошибка отправки кода: {type(e).__name__}: {e}", exc_info=True)
             return {"error": f"Ошибка отправки кода: {str(e)}"}
-    
+
     except Exception as e:
         logger.error(f"Общая ошибка отправки кода: {type(e).__name__}: {e}", exc_info=True)
         return {"error": f"Ошибка: {str(e)}"}
@@ -244,28 +277,28 @@ def verify_code(phone, code, employee_id, employee_fio, account_note, recovery_e
 async def _verify_code_async(phone, code, employee_id, employee_fio, account_note, recovery_email, two_factor_password=None):
     try:
         logger.info(f"Starting verify_code for {phone}")
-        
+
         session_manager = SessionManager()
         settings = await sync_to_async(GlobalAppSettings.objects.using('telegram_db').filter(is_active=True).first)()
         if not settings:
             return {"error": "Глобальные настройки приложения не настроены"}
-        
+
         api_id, api_hash = settings.api_id, settings.api_hash
-        
+
         account_data = await sync_to_async(session_manager.load_account_session)(phone)
         logger.info(f"Loaded account data for {phone}, status: {account_data.get('account_status')}")
-        
+
         if not account_data['session_data']:
             return {"error": "Сессия не найдена. Пожалуйста, отправьте код снова."}
-        
+
         session_data = account_data['session_data']
         if isinstance(session_data, memoryview):
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
-        
+
         client = TelegramClient(
-            StringSession(session_string), 
-            api_id, 
+            StringSession(session_string),
+            api_id,
             api_hash,
             device_model=f"CorporateManager_{platform.system()}",
             system_version=platform.version(),
@@ -274,7 +307,7 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
             system_lang_code="ru"
         )
         await client.connect()
-        
+
         # Если передан пароль 2FA, то пытаемся войти с паролем
         if two_factor_password:
             try:
@@ -282,20 +315,20 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
                 # Успешный вход с паролем
                 new_session_string = client.session.save()
                 new_session_data = new_session_string.encode('utf-8')
-                
+
                 success = await sync_to_async(session_manager.update_session)(
                     phone_number=phone,
                     new_session_data=new_session_data
                 )
-                
+
                 await client.disconnect()
-                
+
                 if success:
                     account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(phone_number=phone)
                     account.is_2fa_enabled = True
                     account.account_status = 'active'
                     await sync_to_async(account.save)()
-                    
+
                     await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                         account=account,
                         action_type="account_added",
@@ -306,7 +339,7 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
                     return {"message": f"Аккаунт {phone} успешно добавлен и активирован (с поддержкой 2FA)."}
                 else:
                     return {"error": f"Не удалось сохранить аккаунт {phone}"}
-                    
+
             except Exception as e:
                 await client.disconnect()
                 logger.error(f"Ошибка входа с паролем 2FA для {phone}: {type(e).__name__}: {e}", exc_info=True)
@@ -317,7 +350,7 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
             if not phone_code_hash:
                 logger.warning(f"No phone_code_hash found for {phone}")
                 return {"error": "Код подтверждения не был запрошен или истек. Пожалуйста, отправьте код снова."}
-            
+
             try:
                 logger.info(f"Attempting sign_in for {phone}")
                 await client.sign_in(
@@ -325,27 +358,27 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
                     code=code,
                     phone_code_hash=phone_code_hash
                 )
-                
+
             except PhoneCodeInvalidError:
                 await client.disconnect()
                 logger.warning(f"Invalid phone code for {phone}")
                 return {"error": "Неверный код подтверждения"}
-            
+
             except PhoneCodeExpiredError:
                 await client.disconnect()
                 logger.warning(f"Phone code expired for {phone}")
                 await sync_to_async(session_manager.clear_phone_code_hash)(phone)
                 return {"error": "Код подтверждения истек. Пожалуйста, запросите новый код."}
-            
+
             except SessionPasswordNeededError:
                 logger.warning(f"2FA password needed for {phone}")
-                
+
                 # Сохраняем сессию с статусом pending_2fa и phone_code_hash
                 session_string = client.session.save()
                 session_data = session_string.encode('utf-8')
-                
+
                 await client.disconnect()
-                
+
                 success = await sync_to_async(session_manager.save_account_session)(
                     phone_number=phone,
                     session_data=session_data,
@@ -356,39 +389,39 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
                     account_status='pending_2fa',
                     phone_code_hash=phone_code_hash
                 )
-                
+
                 if success:
                     return {"error": "Требуется пароль 2FA", "requires_2fa": True}
                 else:
                     return {"error": "Требуется пароль 2FA, но не удалось сохранить состояние сессии"}
-            
+
             except PhoneNumberUnoccupiedError:
                 await client.disconnect()
                 logger.warning(f"Phone number {phone} is not registered in Telegram")
                 return {"error": "Номер телефона не зарегистрирован в Telegram. Пожалуйста, сначала создайте аккаунт в приложении Telegram."}
-            
+
             except Exception as e:
                 await client.disconnect()
                 logger.error(f"Ошибка верификации кода: {type(e).__name__}: {e}", exc_info=True)
                 return {"error": f"Ошибка: {str(e)}"}
-            
+
             # Если код верный и 2FA не требуется
             try:
                 new_session_string = client.session.save()
                 new_session_data = new_session_string.encode('utf-8')
-                
+
                 success = await sync_to_async(session_manager.update_session)(
                     phone_number=phone,
                     new_session_data=new_session_data
                 )
-                
+
                 await client.disconnect()
-                
+
                 if success:
                     account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(phone_number=phone)
                     account.account_status = 'active'
                     await sync_to_async(account.save)()
-                    
+
                     await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                         account=account,
                         action_type="account_added",
@@ -399,12 +432,12 @@ async def _verify_code_async(phone, code, employee_id, employee_fio, account_not
                     return {"message": f"Аккаунт {phone} успешно добавлен и активирован."}
                 else:
                     return {"error": f"Не удалось сохранить аккаунт {phone}"}
-                    
+
             except Exception as e:
                 await client.disconnect()
                 logger.error(f"Ошибка после успешной авторизации: {e}")
                 return {"error": f"Ошибка при сохранении сессии: {str(e)}"}
-    
+
     except Exception as e:
         logger.error(f"Общая ошибка проверки кода: {type(e).__name__}: {e}", exc_info=True)
         return {"error": f"Ошибка: {str(e)}"}
@@ -425,9 +458,9 @@ async def _delete_session_async(account_id):
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
         session_manager = SessionManager()
-        
+
         success = await sync_to_async(session_manager.delete_session)(account.phone_number)
-        
+
         if success:
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                 account=account,
@@ -438,7 +471,7 @@ async def _delete_session_async(account_id):
             return f"Сессия удалена для {account.phone_number}"
         else:
             return f"Не удалось удалить сессию для {account.phone_number}"
-    
+
     except Exception as e:
         logger.error(f"Ошибка удаления сессии: {e}")
         return f"Ошибка: {str(e)}"
@@ -460,7 +493,7 @@ async def _get_account_details_async(account_id):
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
         session_manager = SessionManager()
         account_data = await sync_to_async(session_manager.load_account_session)(account.phone_number)
-        
+
         details = f"""
         Телефон: {account.phone_number}
         Сотрудник: {account.employee_fio}
@@ -476,7 +509,7 @@ async def _get_account_details_async(account_id):
         API ID: {account_data['api_id']}
         API Hash: {account_data['api_hash'][:10]}...
         """
-        
+
         return details
     except Exception as e:
         logger.error(f"Ошибка получения деталей аккаунта: {e}")
@@ -505,30 +538,30 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
     """
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
-        
+
         logger.info(f"Starting reclaim procedure for account {account.phone_number} (ID: {account_id})")
-        
+
         session_manager = SessionManager()
         account_data = await sync_to_async(session_manager.load_account_session)(account.phone_number)
-        
+
         if account_data['account_status'] != 'active':
             return "Аккаунт не активен"
-        
+
         if not account_data['session_data']:
             return "Данные сессии не найдены"
-        
+
         session_data = account_data['session_data']
         if isinstance(session_data, memoryview):
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
-        
+
         # Получаем параметры устройства и прокси
         device_params = account.device_params or {}
         proxy_config = None
         if account.proxy:
             if account.proxy.proxy_type == 'mtproto':
                 from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
-                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.secret)
+                proxy_config = (account.proxy.host, account.proxy.port, account.proxy.password)
             else:
                 proxy_config = (
                     account.proxy.proxy_type,
@@ -537,10 +570,10 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                     account.proxy.username,
                     account.proxy.password
                 )
-        
+
         client = TelegramClient(
-            StringSession(session_string), 
-            account_data['api_id'], 
+            StringSession(session_string),
+            account_data['api_id'],
             account_data['api_hash'],
             device_model=device_params.get('device_model', f'CorporateManager_{platform.system()}'),
             system_version=device_params.get('system_version', platform.version()),
@@ -549,13 +582,13 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             system_lang_code=device_params.get('system_lang_code', 'ru'),
             proxy=proxy_config
         )
-        
+
         await client.connect()
-        
+
         if not await client.is_user_authorized():
             await client.disconnect()
             return "Не авторизован"
-        
+
         try:
             # Проверяем, включено ли 2FA
             if account_data['is_2fa_enabled']:
@@ -587,10 +620,10 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                 except Exception as e:
                     logger.error(f"Ошибка при завершении сессий: {e}")
                     sessions_terminated = False
-            
+
             new_password = ''.join(random.choices(string.ascii_letters + string.digits + '!@#$%^&*', k=16))
             password_changed = False
-            
+
             try:
                 await client.edit_2fa(
                     current_password=two_factor_password if two_factor_password else '',
@@ -602,24 +635,24 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                 logger.warning(f"2FA включено для {account.phone_number}, требуется пароль")
             except Exception as e:
                 logger.warning(f"Не удалось сменить пароль для {account.phone_number}: {e}")
-            
+
             try:
                 await client.log_out()
                 logger.info(f"Logged out from current session for {account.phone_number}")
             except Exception as e:
                 logger.warning(f"Не удалось выйти из сессии: {e}")
-            
+
             await client.disconnect()
-            
+
             success = await sync_to_async(session_manager.delete_session)(account.phone_number)
-            
+
             if not success:
                 logger.warning(f"Failed to delete session from database for {account.phone_number}")
-            
+
             account.account_status = 'reclaimed'
             account.activity_status = 'dead'
             await sync_to_async(account.save)()
-            
+
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                 account=account,
                 action_type="account_reclaimed",
@@ -632,21 +665,21 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                 },
                 performed_by="Система"
             )
-            
+
             logger.info(f"Reclaim procedure completed for {account.phone_number}")
-            
+
             if password_changed and sessions_terminated:
                 return f"Аккаунт {account.phone_number} успешно возвращен. ВСЕ сессии на всех устройствах завершены. Новый пароль: {new_password}"
             elif sessions_terminated:
                 return f"Аккаунт {account.phone_number} возвращен. ВСЕ сессии на всех устройствах завершены. Не удалось сменить пароль (2FA включено или требуется старый пароль)."
             else:
                 return f"Аккаунт {account.phone_number} возвращен с ограниченным успехом. Не удалось завершить все сессии (требуется пароль 2FA)."
-            
+
         except Exception as e:
             await client.disconnect()
             logger.error(f"Ошибка возврата аккаунта: {e}", exc_info=True)
             return f"Ошибка возврата аккаунта: {str(e)}"
-        
+
     except Exception as e:
         logger.error(f"Ошибка возврата аккаунта: {e}", exc_info=True)
         return f"Ошибка: {str(e)}"
@@ -673,21 +706,21 @@ async def _reauthorize_account_async(account_id, two_factor_password=None):
     """
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
-        
+
         logger.info(f"Starting reauthorization for account {account.phone_number} (ID: {account_id})")
-        
+
         session_manager = SessionManager()
         account_data = await sync_to_async(session_manager.load_account_session)(account.phone_number)
-        
+
         settings = await sync_to_async(GlobalAppSettings.objects.using('telegram_db').filter(is_active=True).first)()
         if not settings:
             return {"error": "Глобальные настройки приложения не настроены"}
-        
+
         api_id, api_hash = settings.api_id, settings.api_hash
-        
+
         client = TelegramClient(
-            StringSession(), 
-            api_id, 
+            StringSession(),
+            api_id,
             api_hash,
             device_model=f"CorporateManager_{platform.system()}",
             system_version=platform.version(),
@@ -695,9 +728,9 @@ async def _reauthorize_account_async(account_id, two_factor_password=None):
             lang_code="ru",
             system_lang_code="ru"
         )
-        
+
         await client.connect()
-        
+
         try:
             result = await client.send_code_request(
                 account.phone_number,
@@ -705,12 +738,12 @@ async def _reauthorize_account_async(account_id, two_factor_password=None):
             )
             phone_code_hash = result.phone_code_hash
             logger.info(f"Phone code hash received: {phone_code_hash[:20]}...")
-            
+
             session_string = client.session.save()
             session_data = session_string.encode('utf-8')
-            
+
             await client.disconnect()
-            
+
             success = await sync_to_async(session_manager.save_account_session)(
                 phone_number=account.phone_number,
                 session_data=session_data,
@@ -721,19 +754,19 @@ async def _reauthorize_account_async(account_id, two_factor_password=None):
                 account_status='pending_reauthorization',
                 phone_code_hash=phone_code_hash
             )
-            
+
             if success:
                 logger.info(f"Temporary session and phone_code_hash saved for {account.phone_number}")
                 return {"message": f"Код подтверждения отправлен на {account.phone_number}. Используйте код верификации для завершения.", "requires_code": True}
             else:
                 logger.error(f"Failed to save temporary session and phone_code_hash for {account.phone_number}")
                 return {"error": "Не удалось сохранить данные для повторной авторизации"}
-                
+
         except Exception as e:
             await client.disconnect()
             logger.error(f"Ошибка отправки кода для повторной авторизации: {e}")
             return {"error": f"Ошибка отправки кода: {str(e)}"}
-        
+
     except Exception as e:
         logger.error(f"Ошибка повторной авторизации: {e}")
         return {"error": f"Ошибка: {str(e)}"}
@@ -753,29 +786,29 @@ def verify_reauthorization(account_id, code, two_factor_password=None):
 async def _verify_reauthorization_async(account_id, code, two_factor_password=None):
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
-        
+
         logger.info(f"Verifying reauthorization code for {account.phone_number}")
-        
+
         session_manager = SessionManager()
         account_data = await sync_to_async(session_manager.load_account_session)(account.phone_number)
-        
+
         if not account_data['session_data']:
             return {"error": "Сессия не найдена. Пожалуйста, начните повторную авторизацию сначала."}
-        
+
         session_data = account_data['session_data']
         if isinstance(session_data, memoryview):
             session_data = session_data.tobytes()
         session_string = session_data.decode('utf-8')
-        
+
         settings = await sync_to_async(GlobalAppSettings.objects.using('telegram_db').filter(is_active=True).first)()
         if not settings:
             return {"error": "Глобальные настройки приложения не настроены"}
-        
+
         api_id, api_hash = settings.api_id, settings.api_hash
-        
+
         client = TelegramClient(
-            StringSession(session_string), 
-            api_id, 
+            StringSession(session_string),
+            api_id,
             api_hash,
             device_model=f"CorporateManager_{platform.system()}",
             system_version=platform.version(),
@@ -783,9 +816,9 @@ async def _verify_reauthorization_async(account_id, code, two_factor_password=No
             lang_code="ru",
             system_lang_code="ru"
         )
-        
+
         await client.connect()
-        
+
         # Если передан пароль 2FA, то пытаемся войти с паролем
         if two_factor_password:
             try:
@@ -799,7 +832,7 @@ async def _verify_reauthorization_async(account_id, code, two_factor_password=No
             if not phone_code_hash:
                 logger.warning(f"No phone_code_hash found for {account.phone_number}")
                 return {"error": "Код подтверждения не был запрошен или истек. Пожалуйста, начните повторную авторизацию сначала."}
-            
+
             try:
                 await client.sign_in(
                     phone=account.phone_number,
@@ -819,34 +852,34 @@ async def _verify_reauthorization_async(account_id, code, two_factor_password=No
             except Exception as e:
                 await client.disconnect()
                 return {"error": f"Ошибка входа: {str(e)}"}
-        
+
         # Если вход успешен (с кодом или паролем)
         new_session_string = client.session.save()
         new_session_data = new_session_string.encode('utf-8')
-        
+
         success = await sync_to_async(session_manager.update_session)(
             phone_number=account.phone_number,
             new_session_data=new_session_data
         )
-        
+
         await client.disconnect()
-        
+
         if success:
             account.account_status = 'active'
             account.activity_status = 'active'
             await sync_to_async(account.save)()
-            
+
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
                 account=account,
                 action_type="reauthorization_completed",
                 action_details={"reauthorized": True},
                 performed_by="Система"
             )
-            
+
             return {"message": f"Повторная авторизация успешно завершена для {account.phone_number}"}
         else:
             return {"error": "Не удалось сохранить новую сессию"}
-        
+
     except Exception as e:
         logger.error(f"Ошибка верификации повторной авторизации: {e}")
         return {"error": f"Ошибка: {str(e)}"}
@@ -867,8 +900,8 @@ async def _check_api_credentials_async(api_id, api_hash):
     """Check if API credentials are valid by trying to connect"""
     try:
         client = TelegramClient(
-            StringSession(), 
-            api_id, 
+            StringSession(),
+            api_id,
             api_hash,
             device_model=f"CorporateManager_{platform.system()}",
             system_version=platform.version(),
@@ -876,9 +909,9 @@ async def _check_api_credentials_async(api_id, api_hash):
             lang_code="ru",
             system_lang_code="ru"
         )
-        
+
         await client.connect()
-        
+
         try:
             await client.get_me()
             await client.disconnect()
@@ -886,6 +919,6 @@ async def _check_api_credentials_async(api_id, api_hash):
         except Exception as e:
             await client.disconnect()
             return False, f"Invalid API credentials: {str(e)}"
-        
+
     except Exception as e:
         return False, f"Connection error: {str(e)}"
