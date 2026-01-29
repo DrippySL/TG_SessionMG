@@ -11,48 +11,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='ProxyServer',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('name', models.CharField(max_length=100)),
-                ('host', models.CharField(max_length=200)),
-                ('port', models.IntegerField()),
-                ('username', models.CharField(blank=True, max_length=100, null=True)),
-                ('password', models.CharField(blank=True, max_length=100, null=True)),
-                ('proxy_type', models.CharField(choices=[('socks5', 'SOCKS5'), ('http', 'HTTP'), ('mtproto', 'MTProto')], default='socks5', max_length=20)),
-                ('is_active', models.BooleanField(default=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-            ],
-            options={
-                'verbose_name': 'Proxy Server',
-                'verbose_name_plural': 'Proxy Servers',
-                'db_table': 'proxy_servers',
-            },
-        ),
-        migrations.CreateModel(
-            name='TaskQueue',
-            fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('task_type', models.CharField(choices=[('check_account', 'Проверка аккаунта'), ('bulk_check', 'Групповая проверка'), ('reauthorize', 'Повторная авторизация'), ('reclaim', 'Возврат аккаунта')], max_length=50)),
-                ('account_ids', models.JSONField(blank=True, help_text='ID аккаунтов для групповой операции', null=True)),
-                ('parameters', models.JSONField(blank=True, default=dict, null=True)),
-                ('status', models.CharField(choices=[('pending', 'Ожидает'), ('processing', 'В процессе'), ('completed', 'Завершено'), ('failed', 'Ошибка'), ('cancelled', 'Отменено')], default='pending', max_length=20)),
-                ('progress', models.IntegerField(default=0, help_text='Прогресс в процентах')),
-                ('result', models.JSONField(blank=True, null=True)),
-                ('error_message', models.TextField(blank=True, null=True)),
-                ('created_by', models.CharField(blank=True, max_length=100, null=True)),
-                ('started_at', models.DateTimeField(blank=True, null=True)),
-                ('completed_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-            ],
-            options={
-                'db_table': 'task_queue',
-                'ordering': ['-created_at'],
-            },
-        ),
+        # УДАЛЕНИЕ: ProxyServer, TaskQueue уже созданы в 0001_initial.py
+        # Эти модели не должны создаваться повторно
+        
+        # Добавляем поля к TelegramAccount
         migrations.AddField(
             model_name='telegramaccount',
             name='activity_status',
@@ -86,21 +48,23 @@ class Migration(migrations.Migration):
             model_name='telegramaccount',
             index=models.Index(fields=['activity_status'], name='telegram_ac_activit_1e5b7e_idx'),
         ),
-        migrations.AddField(
-            model_name='taskqueue',
-            name='account',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, to='accounts.telegramaccount'),
-        ),
-        migrations.AddIndex(
-            model_name='taskqueue',
-            index=models.Index(fields=['status'], name='task_queue_status_70f75a_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='taskqueue',
-            index=models.Index(fields=['task_type'], name='task_queue_task_ty_d8a6cb_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='taskqueue',
-            index=models.Index(fields=['created_at'], name='task_queue_created_9029ec_idx'),
-        ),
+        # УДАЛЕНИЕ: Поле account уже добавлено в 0001_initial.py
+        # migrations.AddField(
+        #     model_name='taskqueue',
+        #     name='account',
+        #     field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, to='accounts.telegramaccount'),
+        # ),
+        # УДАЛЕНИЕ: Индексы уже добавлены в 0001_initial.py
+        # migrations.AddIndex(
+        #     model_name='taskqueue',
+        #     index=models.Index(fields=['status'], name='task_queue_status_70f75a_idx'),
+        # ),
+        # migrations.AddIndex(
+        #     model_name='taskqueue',
+        #     index=models.Index(fields=['task_type'], name='task_queue_task_ty_d8a6cb_idx'),
+        # ),
+        # migrations.AddIndex(
+        #     model_name='taskqueue',
+        #     index=models.Index(fields=['created_at'], name='task_queue_created_9029ec_idx'),
+        # ),
     ]
