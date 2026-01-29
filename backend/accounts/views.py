@@ -271,25 +271,13 @@ class ReclaimAccountView(APIView):
         try:
             two_factor_password = request.data.get('two_factor_password', None)
             
-            # Создаем запись в очереди задач
-            task = TaskQueue.objects.create(
-                task_type='reclaim',
-                account_id=pk,
-                parameters={'two_factor_password': two_factor_password is not None},
-                created_by=request.user.username
-            )
+            # Выполняем немедленно без очереди задач
+            result = reclaim_account(pk, two_factor_password)
             
-            # Запускаем задачу Celery
-            reclaim_account_task.delay(pk, two_factor_password, task.id)
-            
-            return Response({
-                'message': 'Задача возврата аккаунта поставлена в очередь',
-                'task_id': task.id
-            })
+            return Response(result)
             
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 class ReauthorizeAccountView(APIView):
     permission_classes = [IsSuperUser]

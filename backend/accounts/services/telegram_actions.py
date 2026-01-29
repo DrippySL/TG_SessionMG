@@ -19,7 +19,7 @@ from telethon.errors import (
     ApiIdInvalidError
 )
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
-from telethon.tl.functions.account import SendChangePhoneCodeRequest
+from telethon.tl.functions.account import GetAuthorizationsRequest, ResetAuthorizationRequest, SendChangePhoneCodeRequest
 from asgiref.sync import sync_to_async, async_to_sync
 from .session_manager import SessionManager, ThreadLocalDBConnection
 from .encryption import EncryptionService
@@ -530,11 +530,12 @@ def reclaim_account(account_id, two_factor_password=None):
 async def _reclaim_account_async(account_id, two_factor_password=None):
     """
     Reclaim account procedure:
-    1. Terminate ALL active sessions on all devices
-    2. Change password if 2FA is not enabled or we have old password
-    3. Log out from current session
-    4. Delete session from database
-    5. Update account status to 'reclaimed'
+    1. Get all active sessions
+    2. Terminate ALL sessions except current one by one
+    3. Change password if 2FA is not enabled or we have old password
+    4. Log out from current session
+    5. Delete session from database
+    6. Update account status to 'reclaimed'
     """
     try:
         account = await sync_to_async(TelegramAccount.objects.using('telegram_db').get)(id=account_id)
@@ -590,43 +591,50 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             return "Не авторизован"
 
         try:
-            # Инициализируем переменную для отслеживания статуса завершения сессий
             sessions_terminated = False
+            terminated_sessions = []
             
-            # Проверяем, включено ли 2FA
-            if account_data['is_2fa_enabled']:
-                if two_factor_password is None:
-                    logger.info(f"2FA enabled for {account.phone_number}, password required")
-                    await client.disconnect()
-                    return {"error": "Требуется пароль 2FA для завершения всех сессий", "requires_2fa": True}
-                else:
-                    try:
-                        # Если передан пароль 2FA, используем его для завершения сессий
-                        await client(ResetAuthorizationsRequest())
+            # Сначала получаем все активные сессии
+            try:
+                logger.info(f"Getting all sessions for {account.phone_number}")
+                sessions_result = await client(GetAuthorizationsRequest())
+                
+                if sessions_result.authorizations:
+                    logger.info(f"Found {len(sessions_result.authorizations)} sessions for {account.phone_number}")
+                    
+                    # Завершаем каждую сессию по отдельности
+                    for session in sessions_result.authorizations:
+                        try:
+                            if session.hash > 0:  # Пропускаем текущую сессию (hash = 0)
+                                logger.info(f"Terminating session from {session.ip} ({session.device_model})")
+                                result = await client(ResetAuthorizationRequest(hash=session.hash))
+                                terminated_sessions.append(f"{session.ip} ({session.device_model})")
+                                logger.info(f"Successfully terminated session from {session.ip}")
+                        except Exception as e:
+                            logger.error(f"Failed to terminate session from {session.ip}: {e}")
+                    
+                    if terminated_sessions:
                         sessions_terminated = True
-                        logger.info(f"All sessions terminated for {account.phone_number} with 2FA password")
-                    except SessionPasswordNeededError:
-                        # Даже с паролем может потребоваться дополнительная аутентификация
-                        logger.warning(f"Still need 2FA password for {account.phone_number}")
-                        await client.disconnect()
-                        return {"error": "Неверный пароль 2FA или требуется дополнительная аутентификация", "requires_2fa": True}
-                    except Exception as e:
-                        logger.error(f"Ошибка при завершении сессий с 2FA: {e}")
-                        sessions_terminated = False
-            else:
-                # Если 2FA не включено, просто завершаем сессии
+                        logger.info(f"Successfully terminated {len(terminated_sessions)} sessions: {terminated_sessions}")
+                    else:
+                        logger.warning(f"No sessions were terminated for {account.phone_number}")
+                else:
+                    logger.info(f"No additional sessions found for {account.phone_number}")
+                    sessions_terminated = True  # Если нет других сессий, считаем что успешно
+                    
+            except Exception as e:
+                logger.error(f"Error getting/terminating sessions: {e}", exc_info=True)
+                # Пробуем запасной вариант с ResetAuthorizationsRequest
                 try:
-                    logger.info(f"Terminating all sessions for {account.phone_number}")
+                    logger.info(f"Fallback: Using ResetAuthorizationsRequest for {account.phone_number}")
                     result = await client(ResetAuthorizationsRequest())
                     sessions_terminated = True
-                    logger.info(f"All sessions terminated for {account.phone_number}")
-                except SessionPasswordNeededError:
-                    logger.warning(f"2FA password needed to terminate sessions for {account.phone_number}")
-                    sessions_terminated = False
-                except Exception as e:
-                    logger.error(f"Ошибка при завершении сессий: {e}")
+                    logger.info(f"ResetAuthorizationsRequest completed for {account.phone_number}")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback also failed: {fallback_error}")
                     sessions_terminated = False
 
+            # Смена пароля
             new_password = ''.join(random.choices(string.ascii_letters + string.digits + '!@#$%^&*', k=16))
             password_changed = False
 
@@ -642,6 +650,7 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             except Exception as e:
                 logger.warning(f"Не удалось сменить пароль для {account.phone_number}: {e}")
 
+            # Выход из текущей сессии
             try:
                 await client.log_out()
                 logger.info(f"Logged out from current session for {account.phone_number}")
@@ -650,11 +659,13 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
 
             await client.disconnect()
 
+            # Удаление сессии из базы данных
             success = await sync_to_async(session_manager.delete_session)(account.phone_number)
 
             if not success:
                 logger.warning(f"Failed to delete session from database for {account.phone_number}")
 
+            # Обновление статуса аккаунта
             account.account_status = 'reclaimed'
             account.activity_status = 'dead'
             await sync_to_async(account.save)()
@@ -666,7 +677,6 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                     "password_changed": password_changed,
                     "new_password": new_password if password_changed else None,
                     "sessions_terminated": sessions_terminated,
-                    "all_sessions_terminated": sessions_terminated,
                     "2fa_used": two_factor_password is not None
                 },
                 performed_by="Система"
@@ -675,11 +685,11 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             logger.info(f"Reclaim procedure completed for {account.phone_number}")
 
             if password_changed and sessions_terminated:
-                return f"Аккаунт {account.phone_number} успешно возвращен. ВСЕ сессии на всех устройствах завершены. Новый пароль: {new_password}"
+                return f"Аккаунт {account.phone_number} успешно возвращен. Все сессии завершены. Новый пароль: {new_password}"
             elif sessions_terminated:
-                return f"Аккаунт {account.phone_number} возвращен. ВСЕ сессии на всех устройствах завершены. Не удалось сменить пароль (2FA включено или требуется старый пароль)."
+                return f"Аккаунт {account.phone_number} возвращен. Все сессии завершены. Не удалось сменить пароль (2FA включено или требуется старый пароль)."
             else:
-                return f"Аккаунт {account.phone_number} возвращен с ограниченным успехом. Не удалось завершить все сессии (требуется пароль 2FA)."
+                return f"Аккаунт {account.phone_number} возвращен с ограниченным успехом. Не удалось завершить все сессии."
 
         except Exception as e:
             await client.disconnect()
