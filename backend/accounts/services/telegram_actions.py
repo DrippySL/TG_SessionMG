@@ -37,22 +37,20 @@ async def check_security_alerts(client, phone):
     """
     try:
         # Ищем сообщения от официального канала Telegram (ID 777000)
-        async for message in client.iter_messages(777000, limit=10):
+        async for message in client.iter_messages(777000, limit=20):
             text = message.text.lower() if message.text else ''
-            triggers = ['password', 'recovery', 'email', 'пароль', 'почта', 'сброс', 'код', 'code', 'reset', 'изменение', 'change']
+            triggers = ['password', 'recovery', 'email', 'пароль', 'почта', 'сброс', 'код', 'code', 'reset', 'изменение', 'change', 'login', 'вход', 'device', 'устройство']
 
-            # Если сообщение свежее (за последние 24 часа) и содержит триггер
+            # Если сообщение свежее (за последние 48 часов) и содержит триггер
             message_time = message.date
             current_time = datetime.datetime.now(timezone.utc)
             time_diff = current_time - message_time
 
-            if time_diff.total_seconds() < 86400:  # 24 часа
+            if time_diff.total_seconds() < 172800:  # 48 часов (увеличили для надежности)
                 if any(word in text for word in triggers):
-                    # Если сообщение не прочитано (is_read может быть False или None)
-                    if message.is_read is not True:
-                        # Помечаем как прочитанное, чтобы не спамить в следующий раз
-                        await client.send_read_acknowledge(777000, max_id=message.id)
-                        return True, message.text
+                    logger.info(f"Security alert found for {phone}: {message.text[:100]}...")
+                    # НЕ помечаем как прочитанное! Позволяем пользователю видеть алерт
+                    return True, message.text
 
         return False, None
 
@@ -592,47 +590,47 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
 
         try:
             sessions_terminated = False
-            terminated_sessions = []
             
-            # Сначала получаем все активные сессии
+            # Проверяем безопасность перед завершением сессий
             try:
-                logger.info(f"Getting all sessions for {account.phone_number}")
-                sessions_result = await client(GetAuthorizationsRequest())
-                
-                if sessions_result.authorizations:
-                    logger.info(f"Found {len(sessions_result.authorizations)} sessions for {account.phone_number}")
+                logger.info(f"Checking security alerts before reclaim for {account.phone_number}")
+                has_security_alert, alert_message = await check_security_alerts(client, account.phone_number)
+                if has_security_alert:
+                    logger.warning(f"SECURITY ALERT during reclaim: {account.phone_number} - {alert_message}")
+                    # Сохраняем алерт в device_params
+                    current_device_params = account.device_params or {}
+                    current_security_info = current_device_params.get('security_info', {})
+                    alert_history = current_security_info.get('alert_history', [])
                     
-                    # Завершаем каждую сессию по отдельности
-                    for session in sessions_result.authorizations:
-                        try:
-                            if session.hash > 0:  # Пропускаем текущую сессию (hash = 0)
-                                logger.info(f"Terminating session from {session.ip} ({session.device_model})")
-                                result = await client(ResetAuthorizationRequest(hash=session.hash))
-                                terminated_sessions.append(f"{session.ip} ({session.device_model})")
-                                logger.info(f"Successfully terminated session from {session.ip}")
-                        except Exception as e:
-                            logger.error(f"Failed to terminate session from {session.ip}: {e}")
+                    new_alert = {
+                        'message': alert_message,
+                        'detected_at': datetime.datetime.now(timezone.utc).isoformat(),
+                        'acknowledged': False,
+                        'context': 'account_reclaim'
+                    }
+                    alert_history.insert(0, new_alert)
+                    alert_history = alert_history[:10]
                     
-                    if terminated_sessions:
-                        sessions_terminated = True
-                        logger.info(f"Successfully terminated {len(terminated_sessions)} sessions: {terminated_sessions}")
-                    else:
-                        logger.warning(f"No sessions were terminated for {account.phone_number}")
-                else:
-                    logger.info(f"No additional sessions found for {account.phone_number}")
-                    sessions_terminated = True  # Если нет других сессий, считаем что успешно
-                    
+                    current_device_params['security_info'] = {
+                        'has_security_alert': True,
+                        'alert_message': alert_message,
+                        'last_security_check': datetime.datetime.now(timezone.utc).isoformat(),
+                        'alert_history': alert_history
+                    }
+                    account.device_params = current_device_params
+                    await sync_to_async(account.save)()
             except Exception as e:
-                logger.error(f"Error getting/terminating sessions: {e}", exc_info=True)
-                # Пробуем запасной вариант с ResetAuthorizationsRequest
-                try:
-                    logger.info(f"Fallback: Using ResetAuthorizationsRequest for {account.phone_number}")
-                    result = await client(ResetAuthorizationsRequest())
-                    sessions_terminated = True
-                    logger.info(f"ResetAuthorizationsRequest completed for {account.phone_number}")
-                except Exception as fallback_error:
-                    logger.error(f"Fallback also failed: {fallback_error}")
-                    sessions_terminated = False
+                logger.error(f"Error checking security alerts during reclaim: {e}")
+
+            # 100% надежный метод - завершаем все сессии через ResetAuthorizationsRequest
+            try:
+                logger.info(f"Resetting all authorizations for {account.phone_number}")
+                result = await client(ResetAuthorizationsRequest())
+                logger.info(f"Reset all authorizations for {account.phone_number}")
+                sessions_terminated = True
+            except Exception as e:
+                logger.error(f"Failed to reset authorizations: {e}")
+                sessions_terminated = False
 
             # Смена пароля
             new_password = ''.join(random.choices(string.ascii_letters + string.digits + '!@#$%^&*', k=16))

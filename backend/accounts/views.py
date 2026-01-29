@@ -285,23 +285,10 @@ class ReauthorizeAccountView(APIView):
     def post(self, request, pk):
         try:
             two_factor_password = request.data.get('two_factor_password', None)
-            
-            # Создаем запись в очереди задач
-            task = TaskQueue.objects.create(
-                task_type='reauthorize',
-                account_id=pk,
-                parameters={'two_factor_password': two_factor_password is not None},
-                created_by=request.user.username
-            )
-            
-            # Запускаем задачу Celery
-            reauthorize_account_task.delay(pk, task.id)
-            
-            return Response({
-                'message': 'Задача повторной авторизации поставлена в очередь',
-                'task_id': task.id,
-                'requires_code': True
-            })
+
+            result = reauthorize_account(pk, two_factor_password)
+
+            return Response(result)
             
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -317,8 +304,27 @@ class VerifyReauthorizationView(APIView):
             
             if not code:
                 return Response({'error': 'Код подтверждения обязателен'}, status=status.HTTP_400_BAD_REQUEST)
-            
+
             result = verify_reauthorization(pk, code, two_factor_password)
+
+            # Если успешно завершена повторная авторизация, обновляем связанную задачу
+            if isinstance(result, dict) and 'message' in result:
+                try:
+                    # Ищем задачу в статусе processing для этого аккаунта
+                    task = TaskQueue.objects.filter(
+                        account_id=pk,
+                        task_type='reauthorize',
+                        status='processing'
+                    ).first()
+
+                    if task:
+                        task.status = 'completed'
+                        task.result = result
+                        task.completed_at = now()
+                        task.save()
+                except Exception as task_error:
+                    logger.warning(f"Не удалось обновить задачу: {task_error}")
+
             if isinstance(result, dict):
                 if 'error' in result:
                     if 'requires_2fa' in result and result['requires_2fa']:
