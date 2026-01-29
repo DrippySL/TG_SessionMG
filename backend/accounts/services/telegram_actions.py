@@ -590,6 +590,9 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
             return "Не авторизован"
 
         try:
+            # Инициализируем переменную для отслеживания статуса завершения сессий
+            sessions_terminated = False
+            
             # Проверяем, включено ли 2FA
             if account_data['is_2fa_enabled']:
                 if two_factor_password is None:
@@ -607,6 +610,9 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                         logger.warning(f"Still need 2FA password for {account.phone_number}")
                         await client.disconnect()
                         return {"error": "Неверный пароль 2FA или требуется дополнительная аутентификация", "requires_2fa": True}
+                    except Exception as e:
+                        logger.error(f"Ошибка при завершении сессий с 2FA: {e}")
+                        sessions_terminated = False
             else:
                 # Если 2FA не включено, просто завершаем сессии
                 try:
