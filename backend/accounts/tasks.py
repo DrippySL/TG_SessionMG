@@ -147,8 +147,57 @@ async def check_account_async(account, account_data):
         
         # Проверяем авторизацию
         if not await client.is_user_authorized():
+            # Проверяем, не была ли сессия Менеджера завершена извне
+            last_check = account.last_checked
+            current_time = now()
+            
+            if last_check:
+                time_since_last_check = current_time - last_check
+                # Если прошло меньше 1 часа с последней проверки, скорее всего сессия была завершена принудительно
+                if time_since_last_check.total_seconds() < 3600:
+                    alert_type = 'recent'
+                else:
+                    # Если прошло больше часа, но сессия все равно не работает - тоже алерт
+                    alert_type = 'old'
+            else:
+                # Если не было предыдущих проверок, но аккаунт не авторизован - подозрительно
+                alert_type = 'first_check'
+            
+            # Создаем алерт в любом случае, если аккаунт не авторизован
+            if alert_type:
+                    current_device_params = account.device_params or {}
+                    current_security_info = current_device_params.get('security_info', {})
+                    alert_history = current_security_info.get('alert_history', [])
+                    
+                    if alert_type == 'recent':
+                        message = f'⚠️ СЕССИЯ МЕНЕДЖЕРА ЗАВЕРШЕНА: Обнаружено при проверке в {current_time.strftime("%H:%M:%S %d.%m.%Y")} (недавнее событие)'
+                    elif alert_type == 'old':
+                        message = f'⚠️ СЕССИЯ МЕНЕДЖЕРА НЕАКТИВНА: Обнаружено при проверке в {current_time.strftime("%H:%M:%S %d.%m.%Y")} (давнее событие)'
+                    else:  # first_check
+                        message = f'⚠️ СЕССИЯ МЕНЕДЖЕРА ЗАВЕРШЕНА: Обнаружено при первой проверке в {current_time.strftime("%H:%M:%S %d.%m.%Y")}'
+                    
+                    manager_terminated_alert = {
+                        'message': message,
+                        'detected_at': current_time.isoformat(),
+                        'acknowledged': False,
+                        'context': f'manager_session_lost_{alert_type}',
+                        'severity': 'high'
+                    }
+                    alert_history.insert(0, manager_terminated_alert)
+                    alert_history = alert_history[:10]
+                    
+                    current_device_params['security_info'] = {
+                        'has_security_alert': True,
+                        'alert_message': manager_terminated_alert['message'],
+                        'last_security_check': current_time.isoformat(),
+                        'alert_history': alert_history
+                    }
+                    account.device_params = current_device_params
+                    logger.warning(f"Manager session lost detected for {account.phone_number}")
+            
             account.activity_status = 'dead'
-            account.last_ping = now()
+            account.last_ping = current_time
+            account.last_checked = current_time
             await sync_to_async(account.save)()
             
             await sync_to_async(AccountAuditLog.objects.using('telegram_db').create)(
@@ -172,20 +221,37 @@ async def check_account_async(account, account_data):
             logger.warning(f"Could not get dialogs for {account.phone_number}: {e}")
             dialog_count = 0
         
-        # Обновляем статус аккаунта
-        account.last_ping = now()
-        account.activity_status = 'active'
-        account.last_checked = now()
+        # Сохраняем информацию о безопасности с историей
+        current_device_params = account.device_params or {}
+        current_security_info = current_device_params.get('security_info', {})
+        alert_history = current_security_info.get('alert_history', [])
         
-        # Сохраняем информацию о безопасности
+        # Если есть новый алерт от Telegram, сохраняем его в историю
+        if has_security_alert and alert_message:
+            new_alert = {
+                'message': alert_message,
+                'detected_at': now().isoformat(),
+                'acknowledged': False,
+                'context': 'telegram_security'
+            }
+            # Добавляем новый алерт в начало истории (максимум 10 последних)
+            alert_history.insert(0, new_alert)
+            alert_history = alert_history[:10]  # Ограничиваем историю
+        
+        
+        # Обновляем статус аккаунта (после проверки безопасности)
+        account.last_ping = current_time
+        account.activity_status = 'active'  # Будет перезаписано в 'dead' если авторизация не прошла
+        account.last_checked = current_time
+        
         security_info = {
-            'has_security_alert': has_security_alert,
-            'alert_message': alert_message,
-            'last_security_check': now().isoformat()
+            'has_security_alert': has_security_alert or len(alert_history) > 0,
+            'alert_message': alert_message if has_security_alert else (alert_history[0]['message'] if alert_history else ''),
+            'last_security_check': current_time.isoformat(),
+            'alert_history': alert_history
         }
         
         # Обновляем device_params с информацией о безопасности
-        current_device_params = account.device_params or {}
         current_device_params['security_info'] = security_info
         account.device_params = current_device_params
         

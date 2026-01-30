@@ -224,6 +224,11 @@ const AlertDetected = () => {
                       <Typography variant="body2" color={item.has_security_alert ? "error" : "textSecondary"}>
                         {item.alert_message || 'Нет сообщений'}
                       </Typography>
+                      {item.alert_history && item.alert_history.length > 0 && (
+                        <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 1 }}>
+                          История: {item.alert_history.length} алерт(ов)
+                        </Typography>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2">
@@ -251,13 +256,13 @@ const AlertDetected = () => {
       <Box mt={3}>
         <Alert severity="info">
           <Typography variant="body2">
-            <strong>Похуй что-то напишу потом</strong>
+            <strong>Информация о мониторинге безопасности:</strong>
           </Typography>
           <Typography variant="body2" sx={{ mt: 1 }}>
-            1. Интересно
-            2. А как
-            3. какают
-            4. бабочки?
+            • Система автоматически проверяет сообщения от официального канала Telegram (ID: 777000)
+            • Обнаруживаются попытки изменения пароля, привязки email и другие действия безопасности
+            • Проверка выполняется при каждой проверке статуса аккаунта
+            • Рекомендуется регулярно проверять статус безопасности всех аккаунтов
           </Typography>
         </Alert>
       </Box>

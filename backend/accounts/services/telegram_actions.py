@@ -628,6 +628,33 @@ async def _reclaim_account_async(account_id, two_factor_password=None):
                 result = await client(ResetAuthorizationsRequest())
                 logger.info(f"Reset all authorizations for {account.phone_number}")
                 sessions_terminated = True
+                
+                # Добавляем алерт о завершении сессии Менеджера
+                current_device_params = account.device_params or {}
+                current_security_info = current_device_params.get('security_info', {})
+                alert_history = current_security_info.get('alert_history', [])
+                
+                manager_session_alert = {
+                    'message': f'🔒 СЕССИЯ МЕНЕДЖЕРА ЗАВЕРШЕНА: Все авторизации сброшены в {datetime.datetime.now(timezone.utc).strftime("%H:%M:%S %d.%m.%Y")} UTC',
+                    'detected_at': datetime.datetime.now(timezone.utc).isoformat(),
+                    'acknowledged': False,
+                    'context': 'manager_session_terminated',
+                    'severity': 'high'
+                }
+                alert_history.insert(0, manager_session_alert)
+                alert_history = alert_history[:10]  # Ограничиваем историю
+                
+                current_device_params['security_info'] = {
+                    'has_security_alert': True,
+                    'alert_message': manager_session_alert['message'],
+                    'last_security_check': datetime.datetime.now(timezone.utc).isoformat(),
+                    'alert_history': alert_history
+                }
+                account.device_params = current_device_params
+                await sync_to_async(account.save)()
+                
+                logger.info(f"Manager session termination alert saved for {account.phone_number}")
+                
             except Exception as e:
                 logger.error(f"Failed to reset authorizations: {e}")
                 sessions_terminated = False
